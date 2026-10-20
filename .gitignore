@@ -1,0 +1,6 @@
+node_modules/
+publish/
+coverage/
+*.js.map
+.DS_Store
+Thumbs.db
