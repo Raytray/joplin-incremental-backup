@@ -33,6 +33,7 @@ import {
   getMaxNotesUpdatedTime,
   getAllFolderIds,
   resolveLastSnapshot,
+  verifyBackup,
   LOCK_FILENAME,
   ACTIVE_DIR_NAME,
   LATEST_FILENAME,
@@ -572,5 +573,50 @@ describe('Backup Engine', () => {
       expect(vol.existsSync(`${BACKUP_ROOT}/${s3}`)).toBe(true);
       expect(vol.existsSync(`${BACKUP_ROOT}/20261020T100000`)).toBe(true);
     });
+  });
+});
+
+describe('Backup Engine - verifyBackup', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetFs();
+    setupMockSettings();
+    (joplin.appVersion as jest.Mock).mockResolvedValue('2.14.0');
+    (joplin.data.get as jest.Mock).mockImplementation(async (path: string[]) => {
+      if (path[0] === 'folders') return { items: [{ id: 'folder-1' }], has_more: false };
+      if (path[0] === 'notes') return { items: [{ updated_time: 1700000000000 }], has_more: false };
+      return { items: [], has_more: false };
+    });
+  });
+
+  it('verifies a valid snapshot', async () => {
+    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+      vol.mkdirSync(targetDir, { recursive: true });
+      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+    });
+    const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
+    await runBackup({ now: fixedDate });
+
+    const result = await verifyBackup();
+    expect(result.ok).toBe(true);
+    expect(result.matched).toBe(1);
+    expect(result.message).toContain('✅');
+  });
+
+  it('detects corrupted snapshot', async () => {
+    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+      vol.mkdirSync(targetDir, { recursive: true });
+      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+    });
+    const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
+    await runBackup({ now: fixedDate });
+
+    // corrupt
+    vol.writeFileSync(`${BACKUP_ROOT}/20261020T120000/note.md`, 'tampered');
+
+    const result = await verifyBackup();
+    expect(result.ok).toBe(false);
+    expect(result.mismatches).toContain('note.md');
+    expect(result.message).toContain('❌');
   });
 });

@@ -19,6 +19,7 @@
 
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
+import * as crypto from 'crypto';
 import joplin from 'api';
 import {
   getSettings,
@@ -385,3 +386,76 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
   }
 }
+
+export interface VerifyResult {
+  ok: boolean;
+  snapshotName: string;
+  snapshotDir: string;
+  total: number;
+  matched: number;
+  mismatches: string[];
+  message: string;
+}
+
+/**
+ * Verify the latest (or specified) snapshot against its manifest.
+ * Checks that every recorded file exists and its SHA-256 matches.
+ */
+export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyResult> {
+  const settings = await getSettings(options.platform);
+  const backupRoot = settings.backupPath;
+
+  const snapshotInfo = await resolveLastSnapshot(backupRoot, settings.lastSnapshot);
+  if (!snapshotInfo) {
+    throw new Error('No snapshot found to verify.');
+  }
+
+  const snapshotDir = snapshotInfo.dir;
+  const snapshotName = snapshotInfo.name;
+  const manifest = await readManifest(snapshotDir);
+  if (!manifest) {
+    throw new Error(`Manifest missing or malformed in snapshot ${snapshotName}.`);
+  }
+
+  let matched = 0;
+  const mismatches: string[] = [];
+
+  for (const entry of manifest.files) {
+    const filePath = nodePath.join(snapshotDir, entry.path);
+    try {
+      const data = await fs.readFile(filePath);
+      const hash = crypto.createHash('sha256').update(data).digest('hex');
+      if (hash === entry.sha256) {
+        matched++;
+      } else {
+        mismatches.push(entry.path);
+      }
+    } catch {
+      mismatches.push(entry.path);
+    }
+  }
+
+  const total = manifest.files.length;
+  const ok = mismatches.length === 0 && matched === total && total > 0;
+  const message = ok
+    ? `✅ All ${matched} files match`
+    : mismatches.length > 0
+      ? `❌ Hash mismatch: ${mismatches.join(', ')}`
+      : `❌ Verification failed`;
+
+  return {
+    ok,
+    snapshotName,
+    snapshotDir,
+    total,
+    matched,
+    mismatches,
+    message,
+  };
+}
+
+export const verifyIncrementalBackup = verifyBackup;
+export const verify = verifyBackup;
+export { verifyBackup as runVerify };
+export { verifyBackup as verifySnapshot };
+export { verifyBackup as checkBackup };

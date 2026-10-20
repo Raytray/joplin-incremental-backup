@@ -34,5 +34,6 @@ module.exports = {
   // The 'api' module is provided by Joplin at runtime; do not bundle it.
   externals: {
     api: 'api',
+    'api/types': 'api/types',
   },
 };
