@@ -63,6 +63,7 @@ export interface BackupOptions {
   now?: Date;
   snapshotName?: string;
   platform?: NodeJS.Platform;
+  profileName?: string;
 }
 
 export interface BackupResult {
@@ -250,10 +251,20 @@ export async function resolveLastSnapshot(
 /**
  * Orchestrate one full backup run.
  */
+export function sanitizeProfileName(profileName: string): string {
+  return profileName.trim().replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+export function resolveBackupRoot(basePath: string, profileName?: string): string {
+  const profile = profileName?.trim();
+  if (!profile) return basePath;
+  return nodePath.join(basePath, sanitizeProfileName(profile));
+}
+
 export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
   // Validate and read configuration
   const settings: BackupSettings = await getSettings(options.platform);
-  const backupRoot = settings.backupPath;
+  const backupRoot = resolveBackupRoot(settings.backupPath, options.profileName);
 
   // Ensure the backup root exists and is writable (auto-create if absent).
   await ensureBackupRoot(backupRoot);
@@ -408,7 +419,7 @@ export interface VerifyResult {
  */
 export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyResult> {
   const settings = await getSettings(options.platform);
-  const backupRoot = settings.backupPath;
+  const backupRoot = resolveBackupRoot(settings.backupPath, options.profileName);
 
   const snapshotInfo = await resolveLastSnapshot(backupRoot, settings.lastSnapshot);
   if (!snapshotInfo) {
