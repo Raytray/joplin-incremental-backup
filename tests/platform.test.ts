@@ -356,4 +356,25 @@ describe('ensureBackupRoot', () => {
   it('throws if path is empty', async () => {
     await expect(ensureBackupRoot('')).rejects.toThrow(/empty/);
   });
+
+  it('propagates unexpected stat errors', async () => {
+    vol.reset();
+    const origStat = memFsPromises.stat;
+    memFsPromises.stat = (async () => {
+      throw Object.assign(new Error('boom'), { code: 'EACCES' });
+    }) as unknown as typeof memFsPromises.stat;
+    await expect(ensureBackupRoot('/some/path')).rejects.toThrow('boom');
+    memFsPromises.stat = origStat;
+  });
+
+  it('throws if path is not writable', async () => {
+    vol.reset();
+    vol.mkdirSync('/readonly', { recursive: true });
+    const origAccess = memFsPromises.access;
+    memFsPromises.access = (async () => {
+      throw new Error('no access');
+    }) as unknown as typeof memFsPromises.access;
+    await expect(ensureBackupRoot('/readonly')).rejects.toThrow(/not writable/);
+    memFsPromises.access = origAccess;
+  });
 });

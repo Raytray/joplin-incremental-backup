@@ -20,4 +20,26 @@ describe('logger', () => {
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
   });
+
+  it('calls console.debug for debug level', () => {
+    const spy = jest.spyOn(console, 'debug').mockImplementation(() => {});
+    logger.debug('dbg');
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('calls console.warn for warn level', () => {
+    const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    logger.warn('warn');
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('falls back to console.log for unknown level', () => {
+    const { log } = require('../src/logger');
+    const spy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    log('verbose' as never, 'msg');
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });

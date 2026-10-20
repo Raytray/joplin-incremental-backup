@@ -525,6 +525,50 @@ describe('Backup Engine', () => {
       expect(joplin.commands.execute).not.toHaveBeenCalled();
     });
 
+    it('supports profileName subfolder', async () => {
+      (joplin.commands.execute as jest.Mock).mockImplementation(
+        async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+          vol.mkdirSync(targetDir, { recursive: true });
+          vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+        }
+      );
+      const result = await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)), profileName: 'My Profile' });
+      expect(result.status).toBe('success');
+      expect(vol.existsSync(`${BACKUP_ROOT}/My_Profile/20261020T120000`)).toBe(true);
+    });
+
+    it('handles release lock failure gracefully', async () => {
+      (joplin.commands.execute as jest.Mock).mockImplementation(
+        async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+          vol.mkdirSync(targetDir, { recursive: true });
+          vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+        }
+      );
+      const origUnlink = memFsPromises.unlink;
+      memFsPromises.unlink = (async () => {
+        throw Object.assign(new Error('no unlink'), { code: 'EPERM' });
+      }) as unknown as typeof memFsPromises.unlink;
+      await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)) });
+      memFsPromises.unlink = origUnlink;
+    });
+
+    it('handles EBUSY during active dir cleanup', async () => {
+      (joplin.commands.execute as jest.Mock).mockImplementation(
+        async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+          vol.mkdirSync(targetDir, { recursive: true });
+          vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+        }
+      );
+      const origRm = memFsPromises.rm;
+      memFsPromises.rm = (async () => {
+        throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      }) as unknown as typeof memFsPromises.rm;
+      const spy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)) });
+      memFsPromises.rm = origRm;
+      spy.mockRestore();
+    });
+
     it('cleans up active dir and releases lock when export command fails', async () => {
       (joplin.commands.execute as jest.Mock).mockRejectedValue(
         new Error('Joplin internal error during export')
@@ -618,5 +662,34 @@ describe('Backup Engine - verifyBackup', () => {
     expect(result.ok).toBe(false);
     expect(result.mismatches).toContain('note.md');
     expect(result.message).toContain('❌');
+  });
+
+  it('throws when no snapshot exists', async () => {
+    resetFs();
+    setupMockSettings();
+    await expect(verifyBackup()).rejects.toThrow(/No snapshot found/);
+  });
+
+  it('throws when manifest is malformed', async () => {
+    resetFs();
+    setupMockSettings();
+    vol.mkdirSync(`${BACKUP_ROOT}/20261020T120000`, { recursive: true });
+    vol.writeFileSync(`${BACKUP_ROOT}/20261020T120000/manifest.json`, '{bad json');
+    vol.writeFileSync(`${BACKUP_ROOT}/${LATEST_FILENAME}`, '20261020T120000');
+    await expect(verifyBackup()).rejects.toThrow(/Manifest missing or malformed/);
+  });
+
+  it('reports missing file as mismatch', async () => {
+    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+      vol.mkdirSync(targetDir, { recursive: true });
+      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+    });
+    const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
+    await runBackup({ now: fixedDate });
+
+    vol.unlinkSync(`${BACKUP_ROOT}/20261020T120000/note.md`);
+    const result = await verifyBackup();
+    expect(result.ok).toBe(false);
+    expect(result.mismatches).toContain('note.md');
   });
 });

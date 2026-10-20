@@ -109,6 +109,23 @@ describe('Scheduler', () => {
     });
     sched.startScheduler(0);
     jest.advanceTimersByTime(60 * 60 * 1000);
-    // runBackup may have been called by previous? reset count
+  });
+
+  it('executeScheduledBackup logs non-EEXIST errors', async () => {
+    (runBackup as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(sched.executeScheduledBackup()).resolves.toBeUndefined();
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('startScheduler with no arg bootstraps from settings', async () => {
+    await sched.startScheduler();
+    expect(joplin.settings.onChange).toHaveBeenCalled();
+  });
+
+  it('resetScheduler with no arg bootstraps from settings', async () => {
+    await sched.resetScheduler();
+    expect(joplin.settings.onChange).toHaveBeenCalled();
   });
 });

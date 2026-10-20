@@ -38,10 +38,6 @@ export async function executeScheduledBackup(): Promise<void> {
   }
 }
 
-async function runScheduledBackup(): Promise<void> {
-  await executeScheduledBackup();
-}
-
 export function stopScheduler(): void {
   if (activeTimer !== null) {
     clearInterval(activeTimer);
@@ -51,11 +47,10 @@ export function stopScheduler(): void {
 
 // aliases added via export renames below
 
-export function startScheduler(intervalHours?: number): void {
+export function startScheduler(intervalHours?: number): void | Promise<void> {
   // If no explicit interval is provided, bootstrap from settings asynchronously.
   if (typeof intervalHours !== 'number' || isNaN(intervalHours)) {
-    void initScheduler();
-    return;
+    return initScheduler();
   }
 
   stopScheduler();
@@ -79,13 +74,13 @@ export function startScheduler(intervalHours?: number): void {
 
 // scheduleBackup, scheduleBackups, enableScheduler are aliases of startScheduler
 
-export function resetScheduler(intervalHours?: number): void {
+export function resetScheduler(intervalHours?: number): void | Promise<void> {
   if (typeof intervalHours === 'number') {
     lastIntervalHours = intervalHours;
     startScheduler(intervalHours);
     return;
   }
-  void initScheduler();
+  return initScheduler();
 }
 
 // restartScheduler, reschedule are aliases of resetScheduler
