@@ -1,0 +1,200 @@
+/**
+ * Step 1D — Deduplication Engine
+ *
+ * Replaces files in the active export with hardlinks to the previous snapshot
+ * where content is identical.
+ */
+
+import * as crypto from 'crypto';
+import * as fs from 'fs/promises';
+import * as nodePath from 'path';
+import { hardlinkOrCopy, toDedupeKey } from './platform';
+import { readManifest, Manifest, FileEntry, DeduplicationMode } from './manifest';
+
+export interface DedupResult {
+  hardlinked: number;
+  copied: number;
+  unchanged: number;
+}
+
+/**
+ * Compute the SHA-256 hex digest of a file.
+ */
+export async function computeSha256(filePath: string): Promise<string> {
+  const content = await fs.readFile(filePath);
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Determine the overall deduplication mode for the snapshot manifest.
+ */
+export function getDeduplicationMode(result: DedupResult): DeduplicationMode {
+  if (result.hardlinked > 0) return 'hardlink';
+  if (result.copied > 0) return 'copy';
+  return 'none';
+}
+
+/**
+ * Recursively collect all file paths under `dir`.
+ * Skips `manifest.json` and temporary `.tmp` files.
+ */
+async function collectFiles(dir: string): Promise<string[]> {
+  const entries = await fs.readdir(dir);
+  const files: string[] = [];
+
+  for (const name of entries) {
+    if (name === 'manifest.json' || name.endsWith('.tmp')) {
+      continue;
+    }
+
+    const fullPath = nodePath.join(dir, name);
+    const stat = await fs.stat(fullPath);
+
+    if (stat.isDirectory()) {
+      const nested = await collectFiles(fullPath);
+      files.push(...nested);
+    } else if (stat.isFile()) {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
+/**
+ * Replace files in `activeDir` with hardlinks to `lastSnapshotDir` where content
+ * is identical, falling back to file copying if hardlinks are unsupported.
+ *
+ * @param activeDir Directory containing the fresh export
+ * @param lastSnapshotDir Path to the previous snapshot directory (optional)
+ * @param previousManifest Optional pre-parsed manifest from the previous snapshot
+ * @returns Counts of hardlinked, copied, and unchanged files
+ */
+export async function dedup(
+  activeDir: string,
+  lastSnapshotDir?: string | null,
+  previousManifest?: Manifest | null,
+): Promise<DedupResult> {
+  const result: DedupResult = {
+    hardlinked: 0,
+    copied: 0,
+    unchanged: 0,
+  };
+
+  // Check if activeDir exists
+  try {
+    const stat = await fs.stat(activeDir);
+    if (!stat.isDirectory()) {
+      return result;
+    }
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code === 'ENOENT') {
+      return result;
+    }
+    throw err;
+  }
+
+  // 1. Walk all files in activeDir recursively
+  const activeFiles = await collectFiles(activeDir);
+  activeFiles.sort((a, b) => a.localeCompare(b));
+
+  if (activeFiles.length === 0) {
+    return result;
+  }
+
+  // Load previous manifest if not supplied directly
+  let prevManifest = previousManifest;
+  if (prevManifest === undefined && lastSnapshotDir) {
+    prevManifest = await readManifest(lastSnapshotDir);
+  }
+
+  // If no previous snapshot or manifest, keep all files as-is
+  if (!prevManifest || !lastSnapshotDir || !Array.isArray(prevManifest.files) || prevManifest.files.length === 0) {
+    result.unchanged = activeFiles.length;
+    return result;
+  }
+
+  // Index the previous manifest entries by normalized path and by sha256
+  const pathIndex = new Map<string, FileEntry>();
+  const hashIndex = new Map<string, FileEntry>();
+
+  for (const entry of prevManifest.files) {
+    const key = toDedupeKey(entry.path);
+    if (!pathIndex.has(key)) {
+      pathIndex.set(key, entry);
+    }
+    if (!hashIndex.has(entry.sha256)) {
+      hashIndex.set(entry.sha256, entry);
+    }
+  }
+
+  for (const activeFilePath of activeFiles) {
+    const relPath = nodePath.relative(activeDir, activeFilePath).replace(/\\/g, '/');
+    const sha256 = await computeSha256(activeFilePath);
+    const key = toDedupeKey(relPath);
+
+    let match: FileEntry | null = null;
+
+    // 4. Look up path in previous snapshot manifest:
+    //    - Same path + same hash → hardlink to previous snapshot's file
+    //    - Different path but same hash → hardlink to that file (content-addressed fallback)
+    //    - No match → keep as-is (new or changed file)
+    const pathMatch = pathIndex.get(key);
+    if (pathMatch && pathMatch.sha256 === sha256) {
+      match = pathMatch;
+    } else if (hashIndex.has(sha256)) {
+      match = hashIndex.get(sha256)!;
+    }
+
+    if (!match) {
+      // No match: keep as-is (new or changed file)
+      result.unchanged++;
+      continue;
+    }
+
+    const prevFilePath = nodePath.join(lastSnapshotDir, match.path);
+
+    // Prevent replacing if the paths resolve to the exact same file
+    if (nodePath.resolve(prevFilePath) === nodePath.resolve(activeFilePath)) {
+      result.unchanged++;
+      continue;
+    }
+
+    // Ensure the source file in previous snapshot actually exists on disk
+    try {
+      await fs.access(prevFilePath);
+    } catch {
+      // Missing source file in previous snapshot; keep active file as-is
+      result.unchanged++;
+      continue;
+    }
+
+    // 5. Use hardlinkOrCopy — remove the active file and link or copy from previous snapshot
+    try {
+      await fs.unlink(activeFilePath);
+    } catch {
+      result.unchanged++;
+      continue;
+    }
+
+    try {
+      const mode = await hardlinkOrCopy(prevFilePath, activeFilePath);
+      if (mode === 'hardlink') {
+        result.hardlinked++;
+      } else {
+        result.copied++;
+      }
+    } catch (err) {
+      // Attempt recovery by copying original content from prevFilePath if linking failed unexpectedly
+      try {
+        await fs.copyFile(prevFilePath, activeFilePath);
+        result.copied++;
+      } catch {
+        throw err;
+      }
+    }
+  }
+
+  return result;
+}
