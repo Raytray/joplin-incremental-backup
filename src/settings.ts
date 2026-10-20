@@ -1,5 +1,6 @@
 import joplin from 'api';
 import { SettingItemType } from 'api/types';
+import { logger } from './logger';
 
 export const SECTION_NAME = 'incrementalBackupSection';
 export const WINDOWS_MAX_PATH_LIMIT = 180;
@@ -36,8 +37,8 @@ export function validateBackupPath(
   }
 
   if (platform === 'win32' && backupPath.length > WINDOWS_MAX_PATH_LIMIT) {
-    console.warn(
-      `[IncrementalBackup] Warning: Backup path length (${backupPath.length}) exceeds ` +
+    logger.warn(
+      `Backup path length (${backupPath.length}) exceeds ` +
         `${WINDOWS_MAX_PATH_LIMIT} characters on Windows. Long path names may cause issues ` +
         `during backup file operations.`
     );

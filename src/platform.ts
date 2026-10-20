@@ -7,6 +7,7 @@
 
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
+import { logger } from './logger';
 
 // ---------------------------------------------------------------------------
 // atomicWriteFile
@@ -186,11 +187,43 @@ export async function safeRmDir(dirPath: string): Promise<void> {
   } catch (err: unknown) {
     const nodeErr = err as NodeJS.ErrnoException;
     if (nodeErr.code === 'EBUSY') {
-      console.warn(
-        `[IncrementalBackup] safeRmDir: could not remove ${dirPath} — directory busy (EBUSY). Skipping.`,
+      logger.warn(
+        `safeRmDir: could not remove ${dirPath} — directory busy (EBUSY). Skipping.`,
       );
     } else {
       throw err;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ensureBackupRoot
+// ---------------------------------------------------------------------------
+
+export async function ensureBackupRoot(backupRoot: string): Promise<void> {
+  if (!backupRoot || !backupRoot.trim()) {
+    throw new Error('Backup path is empty. Please configure a valid backup directory in settings.');
+  }
+
+  try {
+    const stat = await fs.stat(backupRoot);
+    if (!stat.isDirectory()) {
+      throw new Error(`Backup path exists but is not a directory: ${backupRoot}`);
+    }
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code === 'ENOENT') {
+      await fs.mkdir(backupRoot, { recursive: true });
+    } else if (err instanceof Error && err.message.includes('not a directory')) {
+      throw err;
+    } else {
+      throw err;
+    }
+  }
+
+  try {
+    await fs.access(backupRoot, fs.constants.W_OK);
+  } catch {
+    throw new Error(`Backup path is not writable: ${backupRoot}`);
   }
 }

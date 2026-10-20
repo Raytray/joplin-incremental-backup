@@ -32,6 +32,7 @@ import {
   releaseLock,
   atomicWriteFile,
   safeRmDir,
+  ensureBackupRoot,
 } from './platform';
 import {
   buildManifest,
@@ -49,6 +50,7 @@ import {
   listSnapshots,
   SNAPSHOT_PATTERN,
 } from './retention';
+import { logger } from './logger';
 
 export const LOCK_FILENAME = '.backup.lock';
 export const ACTIVE_DIR_NAME = '_joplin_active_';
@@ -253,6 +255,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   const settings: BackupSettings = await getSettings(options.platform);
   const backupRoot = settings.backupPath;
 
+  // Ensure the backup root exists and is writable (auto-create if absent).
+  await ensureBackupRoot(backupRoot);
+
   // Determine lock file path
   const lockPath = options.lockPath ?? nodePath.join(backupRoot, LOCK_FILENAME);
   const staleLimitMs = options.staleLimitMs ?? DEFAULT_STALE_LOCK_MS;
@@ -376,13 +381,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       try {
         await releaseLock(lockPath);
       } catch (err) {
-        console.warn('[IncrementalBackup] Failed to release lock:', err);
+        logger.warn('Failed to release lock:', err);
       }
     }
     try {
       await safeRmDir(activeDir);
     } catch (err) {
-      console.warn('[IncrementalBackup] Failed to clean up active directory:', err);
+      logger.warn('Failed to clean up active directory:', err);
     }
   }
 }

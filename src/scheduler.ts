@@ -12,6 +12,7 @@ import {
   getSettings,
   isSchedulerEnabled,
 } from './settings';
+import { logger } from './logger';
 
 export const HOURS_TO_MS = 60 * 60 * 1000;
 
@@ -30,9 +31,9 @@ export async function executeScheduledBackup(): Promise<void> {
     // Lock contention or other failures are logged but never crash the timer.
     const code = (err as { code?: string } | null)?.code;
     if (code !== 'EEXIST') {
-      console.error('[IncrementalBackup] Scheduled backup failed:', err);
+      logger.error('Scheduled backup failed:', err);
     } else {
-      console.info('[IncrementalBackup] Backup already running; skipping overlapping run.');
+      logger.info('Backup already running; skipping overlapping run.');
     }
   }
 }

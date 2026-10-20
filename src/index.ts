@@ -2,6 +2,7 @@ import joplin from 'api';
 import { registerSettings } from './settings';
 import { initScheduler } from './scheduler';
 import { runBackup, verifyBackup } from './backup';
+import { logger } from './logger';
 
 async function handleCreateIncrementalBackup(): Promise<void> {
   try {
@@ -13,7 +14,7 @@ async function handleCreateIncrementalBackup(): Promise<void> {
       return;
     }
     const message = `Backup completed: ${result.snapshotDir ?? result.snapshotName}`;
-    console.info('[IncrementalBackup] Backup completed', result.snapshotDir, result.dedupStats);
+    logger.info('Backup completed', result.snapshotDir, result.dedupStats);
     await joplin.views.dialogs.showMessageBox(message);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -33,7 +34,7 @@ async function handleVerifyIncrementalBackup(): Promise<void> {
 
 joplin.plugins.register({
   onStart: async function () {
-    console.info('[IncrementalBackup] Plugin started.');
+    logger.info('Plugin started.');
 
     await registerSettings();
 

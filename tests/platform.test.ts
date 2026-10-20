@@ -35,6 +35,7 @@ import {
   hardlinkOrCopy,
   toDedupeKey,
   safeRmDir,
+  ensureBackupRoot,
 } from '../src/platform';
 
 // ---------------------------------------------------------------------------
@@ -330,5 +331,29 @@ describe('safeRmDir', () => {
       code: 'EACCES',
     });
     memFsPromises.rm = origRm;
+  });
+});
+
+describe('ensureBackupRoot', () => {
+  it('creates directory if absent', async () => {
+    vol.reset();
+    await ensureBackupRoot('/new/backup/root');
+    expect(vol.existsSync('/new/backup/root')).toBe(true);
+  });
+
+  it('succeeds if directory exists', async () => {
+    vol.reset();
+    vol.mkdirSync('/existing', { recursive: true });
+    await expect(ensureBackupRoot('/existing')).resolves.toBeUndefined();
+  });
+
+  it('throws if path exists as file', async () => {
+    vol.reset();
+    vol.writeFileSync('/afile', 'x');
+    await expect(ensureBackupRoot('/afile')).rejects.toThrow(/not a directory/);
+  });
+
+  it('throws if path is empty', async () => {
+    await expect(ensureBackupRoot('')).rejects.toThrow(/empty/);
   });
 });
