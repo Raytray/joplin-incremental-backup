@@ -1,0 +1,196 @@
+/**
+ * Step 1B — Cross-Platform Utilities
+ *
+ * All OS-sensitive primitives live here so every other module can remain
+ * platform-agnostic.  Each function is independently testable via memfs.
+ */
+
+import * as fs from 'fs/promises';
+import * as nodePath from 'path';
+
+// ---------------------------------------------------------------------------
+// atomicWriteFile
+// ---------------------------------------------------------------------------
+
+/**
+ * Atomically write `content` to `targetPath`.
+ *
+ * Strategy: write to `<target>.tmp`, then `fs.rename`.
+ * On Windows, rename throws EEXIST if the destination already exists, so we
+ * unlink the destination first and retry once.
+ */
+export async function atomicWriteFile(
+  targetPath: string,
+  content: string,
+): Promise<void> {
+  await fs.mkdir(nodePath.dirname(targetPath), { recursive: true });
+  const tmpPath = targetPath + '.tmp';
+  await fs.writeFile(tmpPath, content, 'utf8');
+  try {
+    await fs.rename(tmpPath, targetPath);
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code === 'EEXIST') {
+      await fs.unlink(targetPath);
+      await fs.rename(tmpPath, targetPath);
+    } else {
+      throw err;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// acquireLock / releaseLock
+// ---------------------------------------------------------------------------
+
+/**
+ * Acquire an exclusive lock file at `lockPath` using the O_EXCL `'wx'` flag.
+ *
+ * If the existing lock is older than `staleLimitMs` milliseconds it is
+ * considered stale: we delete it and retry once.  If the lock is still held
+ * after the retry, we throw with code `'EEXIST'`.
+ *
+ * The lock file stores the creation time (ISO string) so the stale check can
+ * be performed without relying on OS-level mtime (which can be unreliable
+ * across platforms).
+ */
+export async function acquireLock(
+  lockPath: string,
+  staleLimitMs: number,
+): Promise<void> {
+  await fs.mkdir(nodePath.dirname(lockPath), { recursive: true });
+
+  const tryAcquire = async (): Promise<boolean> => {
+    try {
+      const fh = await fs.open(lockPath, 'wx');
+      await fh.writeFile(new Date().toISOString(), 'utf8');
+      await fh.close();
+      return true;
+    } catch (err: unknown) {
+      const nodeErr = err as NodeJS.ErrnoException;
+      if (nodeErr.code === 'EEXIST') {
+        return false;
+      }
+      throw err;
+    }
+  };
+
+  if (await tryAcquire()) return;
+
+  // Lock exists — check whether it is stale.
+  let stale = false;
+  try {
+    const content = await fs.readFile(lockPath, 'utf8');
+    const created = new Date(content).getTime();
+    if (!isNaN(created) && Date.now() - created > staleLimitMs) {
+      stale = true;
+    }
+  } catch {
+    // If we cannot read the lock file, treat it as stale.
+    stale = true;
+  }
+
+  if (stale) {
+    await fs.unlink(lockPath);
+    if (await tryAcquire()) return;
+  }
+
+  // Still blocked.
+  const err: NodeJS.ErrnoException = new Error(
+    `Lock already held: ${lockPath}`,
+  );
+  err.code = 'EEXIST';
+  throw err;
+}
+
+/**
+ * Release (delete) the lock file at `lockPath`.
+ * Silently ignores ENOENT — the lock may already have been cleaned up.
+ */
+export async function releaseLock(lockPath: string): Promise<void> {
+  try {
+    await fs.unlink(lockPath);
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code !== 'ENOENT') throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// hardlinkOrCopy
+// ---------------------------------------------------------------------------
+
+/** Error codes that indicate hardlinks are not supported on this path/OS. */
+const HARDLINK_UNSUPPORTED_CODES = new Set([
+  'EPERM',
+  'ENOTSUP',
+  'EXDEV',
+  'ENOSYS',
+]);
+
+/**
+ * Attempt to create a hardlink from `src` to `dest`.
+ * Falls back to a regular file copy when hardlinks are unsupported (e.g.
+ * cross-device, FAT32, network share, or insufficient permissions on Windows).
+ *
+ * @returns `'hardlink'` when a hardlink was created, `'copy'` otherwise.
+ */
+export async function hardlinkOrCopy(
+  src: string,
+  dest: string,
+): Promise<'hardlink' | 'copy'> {
+  // Ensure the destination directory exists.
+  await fs.mkdir(nodePath.dirname(dest), { recursive: true });
+
+  try {
+    await fs.link(src, dest);
+    return 'hardlink';
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code && HARDLINK_UNSUPPORTED_CODES.has(nodeErr.code)) {
+      await fs.copyFile(src, dest);
+      return 'copy';
+    }
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// toDedupeKey
+// ---------------------------------------------------------------------------
+
+/**
+ * Produce a case-insensitive, forward-slash-normalised key for use in the
+ * deduplication map.  This makes dedup work correctly on case-insensitive
+ * file systems (Windows, macOS) where `Notes/foo.md` and `notes/FOO.MD`
+ * are the same file.
+ */
+export function toDedupeKey(relativePath: string): string {
+  return relativePath.toLowerCase().replace(/\\/g, '/');
+}
+
+// ---------------------------------------------------------------------------
+// safeRmDir
+// ---------------------------------------------------------------------------
+
+/**
+ * Recursively remove `dirPath`.
+ *
+ * On Windows, `EBUSY` errors (e.g. an Explorer window is open inside the
+ * directory) are caught and logged as warnings rather than thrown, so a
+ * transient lock does not abort the whole backup run.
+ */
+export async function safeRmDir(dirPath: string): Promise<void> {
+  try {
+    await fs.rm(dirPath, { recursive: true, force: true });
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    if (nodeErr.code === 'EBUSY') {
+      console.warn(
+        `[IncrementalBackup] safeRmDir: could not remove ${dirPath} — directory busy (EBUSY). Skipping.`,
+      );
+    } else {
+      throw err;
+    }
+  }
+}
