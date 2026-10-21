@@ -153,7 +153,7 @@ export async function collectFiles(dir: string, baseDir: string = dir): Promise<
   return entries;
 }
 
-async function collectFilesFromPaths(filePaths: string[], baseDir: string): Promise<FileEntry[]> {
+export async function collectFilesFromPaths(filePaths: string[], baseDir: string): Promise<FileEntry[]> {
   return mapWithConcurrency(filePaths, 4, async (fullPath) => {
     const stat = await fs.stat(fullPath);
     const sha256 = await computeFileSha256(fullPath);
@@ -174,11 +174,14 @@ export async function buildManifest(
   snapshotDir: string,
   meta?: BuildManifestMeta,
   filePaths?: string[] | null,
+  precomputedEntries?: FileEntry[],
 ): Promise<Manifest> {
   const files =
-    filePaths && filePaths.length > 0
-      ? await collectFilesFromPaths(filePaths, snapshotDir)
-      : await collectFiles(snapshotDir, snapshotDir);
+    precomputedEntries !== undefined
+      ? [...precomputedEntries]
+      : filePaths && filePaths.length > 0
+        ? await collectFilesFromPaths(filePaths, snapshotDir)
+        : await collectFiles(snapshotDir, snapshotDir);
 
   // Sort files by path for deterministic ordering
   files.sort((a, b) => a.path.localeCompare(b.path));

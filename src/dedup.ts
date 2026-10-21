@@ -100,6 +100,7 @@ export async function dedup(
   lastSnapshotDir?: string | null,
   previousManifest?: Manifest | null,
   activeFiles?: string[] | null,
+  precomputedHashes?: Map<string, string> | null,
 ): Promise<DedupResult> {
   const result: DedupResult = {
     hardlinked: 0,
@@ -150,13 +151,17 @@ export async function dedup(
   // Build a content-addressed index of the previous snapshot exactly once per run.
   const { pathIndex, hashIndex } = buildContentIndex(prevManifest);
 
-  // Compute SHA-256 for all active files in parallel (bounded concurrency)
-  const activeHashes = await mapWithConcurrency(activeFileList, 4, (filePath) =>
-    computeSha256(filePath),
-  );
-  const hashMap = new Map<string, string>(
-    activeFileList.map((filePath, index) => [filePath, activeHashes[index]]),
-  );
+  // Reuse precomputed hashes when available; only compute missing entries.
+  const hashMap = new Map<string, string>(precomputedHashes ?? undefined);
+  const missingFiles = activeFileList.filter((filePath) => !hashMap.has(filePath));
+  if (missingFiles.length > 0) {
+    const missingHashes = await mapWithConcurrency(missingFiles, 4, (filePath) =>
+      computeSha256(filePath),
+    );
+    missingFiles.forEach((filePath, index) => {
+      hashMap.set(filePath, missingHashes[index]);
+    });
+  }
 
   for (const activeFilePath of activeFileList) {
     const relPath = nodePath.relative(activeDir, activeFilePath).replace(/\\/g, '/');

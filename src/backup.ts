@@ -30,7 +30,7 @@ import {
   ensureBackupRoot,
   checkDiskSpace,
 } from './platform';
-import { buildManifest, writeManifest, readManifest, Manifest } from './manifest';
+import { buildManifest, writeManifest, readManifest, Manifest, collectFilesFromPaths } from './manifest';
 import {
   dedup,
   collectFiles as collectActiveFiles,
@@ -367,6 +367,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       throw new Error('Export verification failed: export produced zero files.');
     }
 
+    // Compute file entries (path, size, streaming SHA-256) once for both dedup and manifest.
+    const activeEntries = await collectFilesFromPaths(activeFileList, activeDir);
+    const activeHashes = new Map<string, string>(
+      activeFileList.map((filePath, index) => [filePath, activeEntries[index].sha256]),
+    );
+
     // Deduplicate against last snapshot
     const lastSnapshotDir = lastSnapshotInfo ? lastSnapshotInfo.dir : undefined;
     const dedupStats: DedupResult = await dedup(
@@ -374,6 +380,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       lastSnapshotDir,
       lastManifest,
       activeFileList,
+      activeHashes,
     );
 
     // Prepare timestamp and snapshot naming
@@ -399,7 +406,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         lastChangeTime: maxUpdatedTime,
         deduplication: getDeduplicationMode(dedupStats),
       },
-      activeFileList,
+      null,
+      activeEntries,
     );
     await writeManifest(activeDir, manifest);
 
