@@ -5,7 +5,6 @@ import { logger } from './logger';
 
 const HASH_CHUNK_SIZE = 64 * 1024;
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
-const DEFAULT_CONCURRENCY = 8;
 
 const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']);
 const BUSY_CODES = new Set(['EBUSY', 'EPERM']);
@@ -226,5 +225,3 @@ export async function collectFilesRecursive(dir: string, baseDir: string = dir):
   await walk(dir);
   return results;
 }
-
-export const DEFAULT_WORKER_CONCURRENCY = DEFAULT_CONCURRENCY;

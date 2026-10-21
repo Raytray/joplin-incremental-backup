@@ -16,21 +16,22 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 - **Integrity verification** — every snapshot includes a `manifest.json` with the size and SHA-256 hash of every file. A verify command re-checks the whole snapshot and reports any missing or corrupted files.
 - **Crash-safe** — backups are staged in a temporary directory and atomically renamed into place when complete. An exclusive lock prevents overlapping runs, stale locks are recovered automatically, and leftover staging data is cleaned up on startup.
 - **Disk-space pre-flight** — checks available space before starting a backup.
+- **Export warnings surfaced** — if Joplin's exporter skips any item (e.g. still-encrypted notes), the warnings are logged and shown in the backup dialog so an incomplete snapshot isn't mistaken for a complete one.
 
 ## Features
 
-The following features are planned (see [plan.md](./plan.md) for the full design):
+All core features are implemented:
 
-| Feature                                                        | Status  |
-| -------------------------------------------------------------- | ------- |
-| Settings UI (path, interval, retention, skip-if-unchanged)     | Planned |
-| Scheduled auto-backup (`Tools > Options > Incremental Backup`) | Planned |
-| `Create backup now` command (Tools menu)                       | Planned |
-| `Verify last backup` command (Tools menu)                      | Planned |
-| Deduplicated snapshots with hardlinks + copy fallback          | Planned |
-| SHA-256 manifest and integrity verification                    | Planned |
-| Retention-based pruning                                        | Planned |
-| Multi-profile support (optional subfolder per profile)         | Planned |
+| Feature                                                        | Status |
+| -------------------------------------------------------------- | ------ |
+| Settings UI (path, interval, retention, skip-if-unchanged)     | Done   |
+| Scheduled auto-backup (`Tools > Options > Incremental Backup`) | Done   |
+| `Create incremental backup` command (Tools menu)               | Done   |
+| `Verify incremental backup` command (Tools menu)               | Done   |
+| Deduplicated snapshots with hardlinks + copy fallback          | Done   |
+| SHA-256 manifest and integrity verification                    | Done   |
+| Retention-based pruning                                        | Done   |
+| Multi-profile support (optional subfolder per profile)         | Done   |
 
 ## How to use
 
@@ -48,13 +49,20 @@ The following features are planned (see [plan.md](./plan.md) for the full design
 <backup path>/
 ├── 20261020T143022/          ← snapshot (UTC timestamp)
 │   ├── manifest.json         ← file list with SHA-256 hashes
-│   ├── notes/
+│   ├── <note-id>.md          ← one file per note (Raw export format)
 │   ├── resources/
-│   └── ...
+│   │   └── <resource-id>     ← one file per attached resource
+│   └── ...                   ← plus folders/tags/note-tags as <id>.md
 ├── 20261021T090000/          ← next snapshot (unchanged files hardlinked)
 ├── latest.txt                ← name of the newest snapshot
 └── .backup.lock              ← present only while a backup is running
 ```
+
+Notes, notebooks, tags and note-tags are each written as a single `<id>.md` file directly in the snapshot root (this mirrors Joplin's Raw export exactly); only attachments live under `resources/`.
+
+### Encrypted items
+
+The Raw exporter **skips items that are still encrypted** and reports them as warnings rather than failing. If your profile is encrypted, unlock it (and let all items finish downloading/decrypting) before running a backup, otherwise the snapshot will be missing those items. When this happens the plugin logs the warnings and shows them in the backup dialog, so an incomplete snapshot is never silently reported as a full success.
 
 ### Restoring a backup
 

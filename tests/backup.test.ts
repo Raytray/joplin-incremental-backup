@@ -12,6 +12,7 @@ import { vol } from 'memfs';
 import {
   ACTIVE_DIR_NAME,
   collectActiveFiles,
+  extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
   getAllFolderIds,
@@ -28,6 +29,7 @@ import {
 } from '../src/backup';
 import { activeDirPath, snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
+import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
@@ -376,6 +378,49 @@ describe('runBackup — failures', () => {
     const result = await run({ exportRetries: 3 });
     expect(result.status).toBe('success');
     expect(attempts).toBe(2);
+  });
+});
+
+describe('export warnings', () => {
+  it('extractExportWarnings returns [] for non-object or missing warnings', () => {
+    expect(extractExportWarnings(undefined)).toEqual([]);
+    expect(extractExportWarnings(null)).toEqual([]);
+    expect(extractExportWarnings('nope')).toEqual([]);
+    expect(extractExportWarnings({})).toEqual([]);
+    expect(extractExportWarnings({ warnings: 'not-an-array' })).toEqual([]);
+  });
+
+  it('extractExportWarnings keeps only string warnings', () => {
+    expect(extractExportWarnings({ warnings: ['a', 1, null, 'b'] })).toEqual(['a', 'b']);
+  });
+
+  it('surfaces exporter warnings in the result and logs them', async () => {
+    mockState.commandHandlers.exportFolders = async (_ids, _format, target) => {
+      const dir = String(target);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'note.md'), 'hello');
+      return { warnings: ['This item is currently encrypted: note "x" and was not exported.'] };
+    };
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(result.warnings).toEqual([
+      'This item is currently encrypted: note "x" and was not exported.',
+    ]);
+    expect(result.message).toMatch(/may be incomplete/);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Export reported 1 warning'),
+      expect.any(Array),
+    );
+    warn.mockRestore();
+  });
+
+  it('reports no warnings for a clean export', async () => {
+    const result = await run();
+    expect(result.warnings).toEqual([]);
+    expect(result.message).not.toMatch(/incomplete/);
   });
 });
 

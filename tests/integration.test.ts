@@ -57,10 +57,15 @@ class FakeWorkspace {
     this.resources = resources;
   }
 
-  /** Files the RAW export would produce, keyed by relative path. */
+  /**
+   * Files the RAW export would produce, keyed by relative path. Matches real
+   * Joplin: `InteropService_Exporter_Raw` writes each item via
+   * `BaseItem.systemPath()` (`<id>.md`) directly into the export root, plus a
+   * `resources/` subdirectory for attachments.
+   */
   exportFiles(): Array<{ path: string; content: string }> {
     const notes = this.notes.map((note) => ({
-      path: `notes/${note.id}.md`,
+      path: `${note.id}.md`,
       content: note.title,
     }));
     const resources = this.resources.map((resource) => ({
@@ -139,7 +144,15 @@ describe('end-to-end backup lifecycle', () => {
     const snapshotDir = path.join(BACKUP_ROOT, '20260201T000000');
     const manifest = await readManifest(snapshotDir);
     expect(manifest?.fileCount).toBe(2);
-    expect(manifest?.files.map((file) => file.path).sort()).toEqual(['notes/n1.md', 'notes/n2.md']);
+    expect(manifest?.files.map((file) => file.path).sort()).toEqual(['n1.md', 'n2.md']);
+
+    // Real RAW layout: note files sit directly in the export root (no `notes/`
+    // subdirectory); only attachments live under `resources/`.
+    expect((await fs.stat(path.join(snapshotDir, 'n1.md'))).isFile()).toBe(true);
+    await expect(fs.stat(path.join(snapshotDir, 'notes'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+
     expect(await fs.readFile(path.join(BACKUP_ROOT, LATEST_FILENAME), 'utf8')).toBe(
       '20260201T000000',
     );
@@ -178,12 +191,12 @@ describe('end-to-end backup lifecycle', () => {
 
     const secondDir = path.join(BACKUP_ROOT, '20260201T020000');
     const manifest = await readManifest(secondDir);
-    const n2 = manifest?.files.find((file) => file.path === 'notes/n2.md');
+    const n2 = manifest?.files.find((file) => file.path === 'n2.md');
     expect(n2?.sha256).toBe(sha256('Edited'));
 
     // The unchanged note is now a hardlink to the previous snapshot's file.
-    const firstStat = await fs.stat(path.join(BACKUP_ROOT, '20260201T000000', 'notes', 'n1.md'));
-    const secondStat = await fs.stat(path.join(secondDir, 'notes', 'n1.md'));
+    const firstStat = await fs.stat(path.join(BACKUP_ROOT, '20260201T000000', 'n1.md'));
+    const secondStat = await fs.stat(path.join(secondDir, 'n1.md'));
     expect(secondStat.ino).toBe(firstStat.ino);
   });
 
@@ -203,7 +216,7 @@ describe('end-to-end backup lifecycle', () => {
 
     expect(result.status).toBe('success');
     const manifest = await readManifest(path.join(BACKUP_ROOT, '20260201T030000'));
-    expect(manifest?.files.map((file) => file.path)).toEqual(['notes/n1.md']);
+    expect(manifest?.files.map((file) => file.path)).toEqual(['n1.md']);
   });
 
   it('changed resource is detected and included', async () => {
@@ -270,11 +283,11 @@ describe('verification end-to-end', () => {
     installMocks();
     const backup = await run();
 
-    await fs.writeFile(path.join(BACKUP_ROOT, backup.snapshotName!, 'notes', 'n2.md'), 'corrupted');
+    await fs.writeFile(path.join(BACKUP_ROOT, backup.snapshotName!, 'n2.md'), 'corrupted');
 
     const result = await verifyBackup({ backupRoot: BACKUP_ROOT });
     expect(result.ok).toBe(false);
-    expect(result.mismatches).toEqual(['notes/n2.md']);
+    expect(result.mismatches).toEqual(['n2.md']);
   });
 });
 
@@ -325,6 +338,25 @@ describe('plugin startup (onStart)', () => {
     expect(mockState.messageBoxes).toHaveLength(1);
     expect(mockState.messageBoxes[0]).toMatch(/Backup complete/);
     expect(await listSnapshotDirs()).toHaveLength(1);
+  });
+
+  it('shows exporter warnings in the backup dialog', async () => {
+    workspace.setNotes([{ id: 'n1', title: 'Note', updated_time: 100 }]);
+    installMocks();
+    mockState.values[SETTING_KEYS.backupPath] = BACKUP_ROOT;
+    mockState.commandHandlers.exportFolders = async (_ids, _format, target) => {
+      const dir = String(target);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'n1.md'), 'Note');
+      return { warnings: ['This item is currently encrypted: note "n1" and was not exported.'] };
+    };
+
+    await pluginScript!.onStart!();
+    await mockState.registeredCommands[CREATE_COMMAND].execute!();
+
+    expect(mockState.messageBoxes).toHaveLength(1);
+    expect(mockState.messageBoxes[0]).toMatch(/may be incomplete/);
+    expect(mockState.messageBoxes[0]).toMatch(/currently encrypted/);
   });
 
   it('recovers by clearing the staging dir on startup', async () => {

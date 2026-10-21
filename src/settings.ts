@@ -92,7 +92,8 @@ export async function registerSettings(): Promise<void> {
     name: SETTING_SECTION_NAME,
     label: 'Incremental Backup',
     iconName: 'fas fa-archive',
-    description: 'Deduplicated incremental snapshots using the native Raw export format.',
+    description:
+      'Deduplicated incremental snapshots using the native Raw export format. Unlock your profile (and let items finish decrypting) before backing up: Joplin skips still-encrypted items in the export.',
   };
 
   await joplin.settings.registerSection(SETTING_SECTION_NAME, section);

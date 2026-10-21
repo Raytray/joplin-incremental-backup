@@ -56,6 +56,11 @@ export interface BackupResult {
   hardlinked?: number;
   copied?: number;
   unchanged?: number;
+  /**
+   * Warnings reported by `exportFolders` (e.g. items skipped because they are
+   * still encrypted). An empty array means the export was clean.
+   */
+  warnings?: string[];
   message: string;
 }
 
@@ -254,6 +259,20 @@ export function isTransientExportError(error: unknown): boolean {
   );
 }
 
+/**
+ * Extract warnings from the `exportFolders` return value. Joplin's RAW exporter
+ * reports skipped items (e.g. still-encrypted notes/resources) here rather than
+ * failing, so a "successful" export can silently omit data. The shape is
+ * `{ warnings: string[] }`, but the result is typed loosely by the plugin API,
+ * so guard defensively.
+ */
+export function extractExportWarnings(result: unknown): string[] {
+  if (typeof result !== 'object' || result === null || !('warnings' in result)) return [];
+  const { warnings } = result as { warnings?: unknown };
+  if (!Array.isArray(warnings)) return [];
+  return warnings.filter((warning): warning is string => typeof warning === 'string');
+}
+
 export async function retryTransient<T>(
   fn: () => Promise<T>,
   retries: number = DEFAULT_EXPORT_RETRIES,
@@ -346,10 +365,17 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     await fs.mkdir(activeDir, { recursive: true });
 
     const folderIds = await getAllFolderIds();
-    await retryTransient(
+    const exportResult = await retryTransient(
       () => joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, activeDir),
       context.exportRetries,
     );
+    const exportWarnings = extractExportWarnings(exportResult);
+    if (exportWarnings.length > 0) {
+      logger.warn(
+        `Export reported ${exportWarnings.length} warning(s); the snapshot may be incomplete:`,
+        exportWarnings,
+      );
+    }
 
     const activeFiles = await collectActiveFiles(activeDir);
     if (activeFiles.length === 0) {
@@ -397,7 +423,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       hardlinked: dedupResult.hardlinked,
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
-      message: `Backup complete: ${manifest.fileCount} files in ${snapshotName}.`,
+      warnings: exportWarnings,
+      message:
+        `Backup complete: ${manifest.fileCount} files in ${snapshotName}.` +
+        (exportWarnings.length > 0
+          ? ` ${exportWarnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
+          : ''),
     };
   } finally {
     try {

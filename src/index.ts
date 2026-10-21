@@ -3,7 +3,7 @@ import { MenuItemLocation } from 'api/types';
 import type { MenuItem } from 'api/types';
 import { logger } from './logger';
 import { runBackup, verifyBackup, recoverBackupDirs } from './backup';
-import { registerSettings, setLastBackup } from './settings';
+import { registerSettings } from './settings';
 import { initScheduler } from './scheduler';
 
 export const CREATE_COMMAND = 'CreateIncrementalBackup';
@@ -17,10 +17,12 @@ export async function handleCreateBackup(): Promise<void> {
       await joplin.views.dialogs.showMessageBox(result.message);
       return;
     }
-    await setLastBackup(new Date().toISOString());
     await joplin.views.dialogs.showMessageBox(
       `${result.message}\n\nDeduplication: ${result.deduplication} ` +
-        `(hardlinked ${result.hardlinked}, copied ${result.copied}, unchanged ${result.unchanged}).`,
+        `(hardlinked ${result.hardlinked}, copied ${result.copied}, unchanged ${result.unchanged}).` +
+        (result.warnings && result.warnings.length > 0
+          ? `\n\nWarnings (${result.warnings.length}):\n${result.warnings.join('\n')}`
+          : ''),
     );
   } catch (error) {
     logger.error('Backup failed.', error);
