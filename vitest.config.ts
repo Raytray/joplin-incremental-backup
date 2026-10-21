@@ -24,6 +24,7 @@ export default defineConfig({
         'src/dedup.ts',
         'src/retention.ts',
         'src/backup.ts',
+        'src/scheduler.ts',
       ],
       exclude: ['src/__mocks__/**'],
       reporter: ['text', 'html'],
