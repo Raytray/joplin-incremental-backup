@@ -19,7 +19,6 @@
 
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
-import * as crypto from 'crypto';
 import joplin from 'api';
 import { getSettings, setLastBackup, setLastSnapshot, BackupSettings } from './settings';
 import {
@@ -29,6 +28,7 @@ import {
   safeRmDir,
   ensureBackupRoot,
   checkDiskSpace,
+  computeFileSha256,
 } from './platform';
 import { buildManifest, writeManifest, readManifest, Manifest, collectFilesFromPaths } from './manifest';
 import {
@@ -506,8 +506,12 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   for (const entry of manifest.files) {
     const filePath = nodePath.join(snapshotDir, entry.path);
     try {
-      const data = await fs.readFile(filePath);
-      const hash = crypto.createHash('sha256').update(data).digest('hex');
+      const stat = await fs.stat(filePath);
+      if (stat.size !== entry.size) {
+        mismatches.push(entry.path);
+        continue;
+      }
+      const hash = await computeFileSha256(filePath);
       if (hash === entry.sha256) {
         matched++;
       } else {

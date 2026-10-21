@@ -140,8 +140,7 @@ export async function collectFiles(dir: string, baseDir: string = dir): Promise<
   // Hash files in parallel with bounded concurrency
   const entries = await mapWithConcurrency(filePaths, 4, async (fullPath) => {
     const stat = await fs.stat(fullPath);
-    const content = await fs.readFile(fullPath);
-    const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+    const sha256 = await computeFileSha256(fullPath);
     const relativePath = nodePath.relative(baseDir, fullPath).replace(/\\/g, '/');
     return {
       path: relativePath,
