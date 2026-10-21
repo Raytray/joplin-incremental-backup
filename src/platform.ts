@@ -23,10 +23,26 @@ export function errorCode(error: unknown): string | undefined {
  * Write `content` to `targetPath` via a temporary file so readers never observe
  * a partially written file. Renames over an existing target are retried after
  * unlinking, which covers Windows' refusal to rename onto an existing file.
+ *
+ * The temp file is fsynced before the rename, and a best-effort fsync of the
+ * parent directory is attempted afterward so `manifest.json` and `latest.txt`
+ * survive a power cut. Directory fsync failures are ignored (Windows cannot
+ * fsync a directory this way; some filesystems reject it).
  */
 export async function atomicWriteFile(targetPath: string, content: string): Promise<void> {
   const tmpPath = `${targetPath}.tmp`;
-  await fs.writeFile(tmpPath, content, 'utf8');
+
+  // Write and fsync the temp file.
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(tmpPath, 'w');
+    await handle.writeFile(content, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle?.close();
+  }
+
+  // Atomic replace (POSIX + Windows fallback).
   try {
     await fs.rename(tmpPath, targetPath);
   } catch (error) {
@@ -34,10 +50,20 @@ export async function atomicWriteFile(targetPath: string, content: string): Prom
     if (code === 'EEXIST' || code === 'EPERM') {
       await fs.rm(targetPath, { force: true });
       await fs.rename(tmpPath, targetPath);
-      return;
+    } else {
+      await fs.rm(tmpPath, { force: true });
+      throw error;
     }
-    await fs.rm(tmpPath, { force: true });
-    throw error;
+  }
+
+  // Best-effort fsync of the parent directory so the rename is durable.
+  const parentDir = path.dirname(targetPath);
+  try {
+    const dirHandle = await fs.open(parentDir, 'r');
+    await dirHandle.sync();
+    await dirHandle.close();
+  } catch {
+    // Ignore: Windows can't fsync a directory, some filesystems reject it.
   }
 }
 

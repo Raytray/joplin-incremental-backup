@@ -593,6 +593,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     await setLastBackup(nowIso);
     await setLastSnapshot(snapshotName);
 
+    // Warn if hardlinks are unsupported — the user may not realize each snapshot
+    // consumes full vault size when the filesystem falls back to copies.
+    if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
+      warnings.push(
+        'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+      );
+    }
+
     return {
       status: 'success',
       snapshotName,
