@@ -1,8 +1,10 @@
 import joplin from 'api';
+import { logger } from './logger';
+import { registerSettings } from './settings';
 
 joplin.plugins.register({
   onStart: async function () {
-    // eslint-disable-next-line no-console
-    console.info('Hello world. Test plugin started!');
+    logger.info('Incremental Backup plugin started.');
+    await registerSettings();
   },
 });
