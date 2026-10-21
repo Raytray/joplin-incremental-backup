@@ -8,7 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
-import { atomicWriteFile, mapWithConcurrency } from './platform';
+import { atomicWriteFile, mapWithConcurrency, computeFileSha256 } from './platform';
 
 export interface FileEntry {
   /** Relative path within snapshot (forward-slash normalized) */
@@ -162,6 +162,22 @@ async function collectFiles(
   return entries;
 }
 
+async function collectFilesFromPaths(
+  filePaths: string[],
+  baseDir: string,
+): Promise<FileEntry[]> {
+  return mapWithConcurrency(filePaths, 4, async (fullPath) => {
+    const stat = await fs.stat(fullPath);
+    const sha256 = await computeFileSha256(fullPath);
+    const relativePath = nodePath.relative(baseDir, fullPath).replace(/\\/g, '/');
+    return {
+      path: relativePath,
+      size: stat.size,
+      sha256,
+    } as FileEntry;
+  });
+}
+
 /**
  * Walk `snapshotDir`, compute SHA-256 and size for each file, and construct
  * a complete `Manifest`.
@@ -169,8 +185,12 @@ async function collectFiles(
 export async function buildManifest(
   snapshotDir: string,
   meta?: BuildManifestMeta,
+  filePaths?: string[] | null,
 ): Promise<Manifest> {
-  const files = await collectFiles(snapshotDir, snapshotDir);
+  const files =
+    filePaths && filePaths.length > 0
+      ? await collectFilesFromPaths(filePaths, snapshotDir)
+      : await collectFiles(snapshotDir, snapshotDir);
 
   // Sort files by path for deterministic ordering
   files.sort((a, b) => a.path.localeCompare(b.path));

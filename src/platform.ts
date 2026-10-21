@@ -6,6 +6,7 @@
  */
 
 import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import * as nodePath from 'path';
 import { logger } from './logger';
 
@@ -283,4 +284,27 @@ export async function ensureBackupRoot(backupRoot: string): Promise<void> {
   } catch {
     throw new Error(`Backup path is not writable: ${backupRoot}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming hash
+// ---------------------------------------------------------------------------
+
+export async function computeFileSha256(filePath: string): Promise<string> {
+  const hash = crypto.createHash('sha256');
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    let bytesRead = 0;
+    do {
+      const result = await handle.read(buffer, 0, buffer.length, null);
+      bytesRead = result.bytesRead;
+      if (bytesRead > 0) {
+        hash.update(buffer.subarray(0, bytesRead));
+      }
+    } while (bytesRead > 0);
+  } finally {
+    await handle.close();
+  }
+  return hash.digest('hex');
 }

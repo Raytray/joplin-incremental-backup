@@ -8,7 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
-import { hardlinkOrCopy, toDedupeKey, mapWithConcurrency } from './platform';
+import { hardlinkOrCopy, toDedupeKey, mapWithConcurrency, computeFileSha256 } from './platform';
 import { readManifest, Manifest, FileEntry, DeduplicationMode } from './manifest';
 
 export interface DedupResult {
@@ -21,8 +21,7 @@ export interface DedupResult {
  * Compute the SHA-256 hex digest of a file.
  */
 export async function computeSha256(filePath: string): Promise<string> {
-  const content = await fs.readFile(filePath);
-  return crypto.createHash('sha256').update(content).digest('hex');
+  return computeFileSha256(filePath);
 }
 
 /**
@@ -38,7 +37,7 @@ export function getDeduplicationMode(result: DedupResult): DeduplicationMode {
  * Recursively collect all file paths under `dir`.
  * Skips `manifest.json` and temporary `.tmp` files.
  */
-async function collectFiles(dir: string): Promise<string[]> {
+export async function collectFiles(dir: string): Promise<string[]> {
   const entries = await fs.readdir(dir);
   const files: string[] = [];
 
@@ -101,6 +100,7 @@ export async function dedup(
   activeDir: string,
   lastSnapshotDir?: string | null,
   previousManifest?: Manifest | null,
+  activeFiles?: string[] | null,
 ): Promise<DedupResult> {
   const result: DedupResult = {
     hardlinked: 0,
@@ -122,11 +122,13 @@ export async function dedup(
     throw err;
   }
 
-  // 1. Walk all files in activeDir recursively
-  const activeFiles = await collectFiles(activeDir);
-  activeFiles.sort((a, b) => a.localeCompare(b));
+  // 1. Walk all files in activeDir recursively (or reuse a pre-collected list)
+  const resolvedActiveFiles = activeFiles && activeFiles.length > 0
+    ? [...activeFiles]
+    : await collectFiles(activeDir);
+  const activeFileList = resolvedActiveFiles.sort((a, b) => a.localeCompare(b));
 
-  if (activeFiles.length === 0) {
+  if (activeFileList.length === 0) {
     return result;
   }
 
@@ -138,7 +140,7 @@ export async function dedup(
 
   // If no previous snapshot or manifest, keep all files as-is
   if (!prevManifest || !lastSnapshotDir || !Array.isArray(prevManifest.files) || prevManifest.files.length === 0) {
-    result.unchanged = activeFiles.length;
+    result.unchanged = activeFileList.length;
     return result;
   }
 
@@ -146,14 +148,14 @@ export async function dedup(
   const { pathIndex, hashIndex } = buildContentIndex(prevManifest);
 
   // Compute SHA-256 for all active files in parallel (bounded concurrency)
-  const activeHashes = await mapWithConcurrency(activeFiles, 4, (filePath) =>
+  const activeHashes = await mapWithConcurrency(activeFileList, 4, (filePath) =>
     computeSha256(filePath),
   );
   const hashMap = new Map<string, string>(
-    activeFiles.map((filePath, index) => [filePath, activeHashes[index]]),
+    activeFileList.map((filePath, index) => [filePath, activeHashes[index]]),
   );
 
-  for (const activeFilePath of activeFiles) {
+  for (const activeFilePath of activeFileList) {
     const relPath = nodePath.relative(activeDir, activeFilePath).replace(/\\/g, '/');
     const sha256 = hashMap.get(activeFilePath)!;
     const key = toDedupeKey(relPath);

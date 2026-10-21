@@ -43,6 +43,7 @@ import {
 } from './manifest';
 import {
   dedup,
+  collectFiles as collectActiveFiles,
   getDeduplicationMode,
   DedupResult,
 } from './dedup';
@@ -373,15 +374,15 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       options.exportRetries ?? 3,
     );
 
-    // Verify export: count files in activeDir; throw if zero
-    const fileCount = await countFilesInDir(activeDir);
-    if (fileCount === 0) {
+    // Collect the exported files once (avoid repeated directory walks)
+    const activeFileList = await collectActiveFiles(activeDir);
+    if (activeFileList.length === 0) {
       throw new Error('Export verification failed: export produced zero files.');
     }
 
     // Deduplicate against last snapshot
     const lastSnapshotDir = lastSnapshotInfo ? lastSnapshotInfo.dir : undefined;
-    const dedupStats: DedupResult = await dedup(activeDir, lastSnapshotDir, lastManifest);
+    const dedupStats: DedupResult = await dedup(activeDir, lastSnapshotDir, lastManifest, activeFileList);
 
     // Prepare timestamp and snapshot naming
     const now = options.now ?? new Date();
@@ -403,7 +404,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       joplinVersion,
       lastChangeTime: maxUpdatedTime,
       deduplication: getDeduplicationMode(dedupStats),
-    });
+    }, activeFileList);
     await writeManifest(activeDir, manifest);
 
     // Move staging directory activeDir to final snapshotDir
