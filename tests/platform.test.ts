@@ -22,6 +22,7 @@ import {
   safeRmDir,
   toDedupeKey,
 } from '../src/platform';
+import { logger } from '../src/logger';
 
 const ROOT = '/data';
 
@@ -182,5 +183,117 @@ describe('filesystem helpers', () => {
   it('checkDiskSpace returns free bytes', async () => {
     const free = await checkDiskSpace(ROOT, 0);
     expect(free).toBeGreaterThanOrEqual(0);
+  });
+
+  it('checkDiskSpace warns (without throwing) when below the threshold', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const free = await checkDiskSpace(ROOT, Number.MAX_SAFE_INTEGER);
+
+    expect(free).toBeGreaterThanOrEqual(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/Low disk space/);
+    warn.mockRestore();
+  });
+
+  it('checkDiskSpace returns -1 when the filesystem is unavailable', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const statfsSpy = vi
+      .spyOn(fs, 'statfs')
+      .mockRejectedValueOnce(Object.assign(new Error('nope'), { code: 'ENOSYS' }));
+
+    await expect(checkDiskSpace(ROOT, 0)).resolves.toBe(-1);
+    expect(warn).toHaveBeenCalled();
+    statfsSpy.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('checkDiskSpace rethrows unexpected errors', async () => {
+    const statfsSpy = vi
+      .spyOn(fs, 'statfs')
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'EPERM' }));
+
+    await expect(checkDiskSpace(ROOT, 0)).rejects.toMatchObject({ code: 'EPERM' });
+    statfsSpy.mockRestore();
+  });
+});
+
+describe('atomicWriteFile edge cases', () => {
+  it('retries the rename after unlinking on EEXIST', async () => {
+    const target = path.join(ROOT, 'retry.md');
+    await fs.writeFile(target, 'old');
+
+    const renameSpy = vi
+      .spyOn(fs, 'rename')
+      .mockRejectedValueOnce(Object.assign(new Error('exists'), { code: 'EEXIST' }));
+
+    await atomicWriteFile(target, 'new');
+
+    expect(await fs.readFile(target, 'utf8')).toBe('new');
+    renameSpy.mockRestore();
+  });
+
+  it('cleans up the temp file and rethrows on unexpected rename errors', async () => {
+    const target = path.join(ROOT, 'fail.md');
+
+    const renameSpy = vi
+      .spyOn(fs, 'rename')
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'EIO' }));
+
+    await expect(atomicWriteFile(target, 'x')).rejects.toMatchObject({ code: 'EIO' });
+    expect(await fs.stat(`${target}.tmp`).catch(() => null)).toBeNull();
+    renameSpy.mockRestore();
+  });
+});
+
+describe('acquireLock edge cases', () => {
+  it('rethrows unexpected stat errors while checking staleness', async () => {
+    const lockPath = path.join(ROOT, 'stat-error.lock');
+    await fs.writeFile(lockPath, 'held');
+
+    const statSpy = vi
+      .spyOn(fs, 'stat')
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'EACCES' }));
+
+    await expect(acquireLock(lockPath, 1000)).rejects.toMatchObject({ code: 'EACCES' });
+    statSpy.mockRestore();
+  });
+
+  it('throws EEXIST when the lock disappears but a new one is created immediately', async () => {
+    const lockPath = path.join(ROOT, 'race.lock');
+    await fs.writeFile(lockPath, 'held');
+
+    const statSpy = vi
+      .spyOn(fs, 'stat')
+      .mockRejectedValueOnce(Object.assign(new Error('gone'), { code: 'ENOENT' }));
+
+    // The lock file still exists on disk, so the retry attempt fails with EEXIST.
+    await expect(acquireLock(lockPath, 1000)).rejects.toMatchObject({ code: 'EEXIST' });
+    statSpy.mockRestore();
+  });
+
+  it('rethrows unexpected errors from the create attempt', async () => {
+    const lockPath = path.join(ROOT, 'open-error.lock');
+    const openSpy = vi
+      .spyOn(fs, 'open')
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { code: 'EACCES' }));
+
+    await expect(acquireLock(lockPath, 1000)).rejects.toMatchObject({ code: 'EACCES' });
+    openSpy.mockRestore();
+  });
+});
+
+describe('hardlinkOrCopy edge cases', () => {
+  it('rethrows non-fallback link errors', async () => {
+    const src = path.join(ROOT, 'src.txt');
+    const dest = path.join(ROOT, 'dest.txt');
+    await fs.writeFile(src, 'hello');
+
+    const linkSpy = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValueOnce(Object.assign(new Error('exists'), { code: 'EEXIST' }));
+
+    await expect(hardlinkOrCopy(src, dest)).rejects.toMatchObject({ code: 'EEXIST' });
+    linkSpy.mockRestore();
   });
 });

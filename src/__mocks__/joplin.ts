@@ -13,12 +13,23 @@ export interface MockJoplinState {
   commandResults: Record<string, unknown>;
   /** Optional side effects per command name (e.g. writing export files). */
   commandHandlers: Record<string, (...args: unknown[]) => unknown>;
+  /** Commands registered by the plugin (name → definition). */
+  registeredCommands: Record<
+    string,
+    { name: string; label?: string; execute?: (...args: unknown[]) => unknown }
+  >;
+  /** Menus created by the plugin. */
+  createdMenus: Array<{ id: string; label: string; items: unknown[]; location?: string }>;
+  /** Messages shown via `views.dialogs.showMessageBox`. */
+  messageBoxes: string[];
   /** Canned items returned by `data.get`, keyed by resource name. */
   dataItems: Record<string, Array<Record<string, unknown>>>;
   /** When set, `data.get` rejects with this error (used for transient-failure tests). */
   dataError: Error | null;
   versionError: Error | null;
   dataPageLimit: number;
+  /** The plugin script passed to `joplin.plugins.register()`. */
+  pluginScript: { onStart?: () => Promise<void> } | null;
 }
 
 function createState(): MockJoplinState {
@@ -31,10 +42,14 @@ function createState(): MockJoplinState {
     executedCommands: [],
     commandResults: {},
     commandHandlers: {},
+    registeredCommands: {},
+    createdMenus: [],
+    messageBoxes: [],
     dataItems: {},
     dataError: null,
     versionError: null,
     dataPageLimit: 100,
+    pluginScript: null,
   };
 }
 
@@ -77,17 +92,24 @@ const joplin = {
       if (handler) return handler(...args);
       return mockState.commandResults[name];
     },
-    async register(_command: unknown): Promise<void> {},
+    async register(command: {
+      name: string;
+      label?: string;
+      execute?: (...args: unknown[]) => unknown;
+    }): Promise<void> {
+      mockState.registeredCommands[command.name] = command;
+    },
   },
   views: {
     menus: {
-      async create(_name: string): Promise<string> {
-        return 'menu';
+      async create(id: string, label: string, items: unknown[], location?: string): Promise<void> {
+        mockState.createdMenus.push({ id, label, items, location });
       },
       async addItems(_menu: string, _items: unknown[]): Promise<void> {},
     },
     dialogs: {
-      async showMessageBox(_message: string): Promise<number> {
+      async showMessageBox(message: string): Promise<number> {
+        mockState.messageBoxes.push(message);
         return 0;
       },
     },
@@ -106,7 +128,9 @@ const joplin = {
     },
   },
   plugins: {
-    register(_options: unknown): void {},
+    register(script: { onStart?: () => Promise<void> }): void {
+      mockState.pluginScript = script;
+    },
   },
   async versionInfo(): Promise<{
     version: string;
