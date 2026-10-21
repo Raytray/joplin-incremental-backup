@@ -27,7 +27,7 @@ describe('Settings module', () => {
         expect.objectContaining({
           label: 'Incremental Backup',
           iconName: 'fas fa-archive',
-        })
+        }),
       );
 
       expect(joplin.settings.registerSettings).toHaveBeenCalledTimes(1);
@@ -52,7 +52,7 @@ describe('Settings module', () => {
           section: SECTION_NAME,
           public: true,
           minimum: 1,
-        })
+        }),
       );
 
       expect(registeredSettings).toHaveProperty(SettingKeys.BackupInterval);
@@ -63,7 +63,7 @@ describe('Settings module', () => {
           section: SECTION_NAME,
           public: true,
           minimum: 0,
-        })
+        }),
       );
 
       expect(registeredSettings).toHaveProperty(SettingKeys.OnlyOnChange);
@@ -73,7 +73,7 @@ describe('Settings module', () => {
           type: SettingItemType.Bool,
           section: SECTION_NAME,
           public: true,
-        })
+        }),
       );
 
       expect(registeredSettings).toHaveProperty(SettingKeys.LastBackup);
@@ -83,7 +83,7 @@ describe('Settings module', () => {
           type: SettingItemType.String,
           section: SECTION_NAME,
           public: false,
-        })
+        }),
       );
 
       expect(registeredSettings).toHaveProperty(SettingKeys.LastSnapshot);
@@ -93,7 +93,7 @@ describe('Settings module', () => {
           type: SettingItemType.String,
           section: SECTION_NAME,
           public: false,
-        })
+        }),
       );
     });
   });
@@ -152,7 +152,7 @@ describe('Settings module', () => {
       (joplin.settings.value as jest.Mock).mockResolvedValue(undefined);
 
       await expect(getSettings()).rejects.toThrow(
-        'Backup path is empty. Please configure a valid backup directory in settings.'
+        'Backup path is empty. Please configure a valid backup directory in settings.',
       );
     });
 
@@ -165,7 +165,7 @@ describe('Settings module', () => {
       });
 
       await expect(getSettings()).rejects.toThrow(
-        'Backup path is empty. Please configure a valid backup directory in settings.'
+        'Backup path is empty. Please configure a valid backup directory in settings.',
       );
     });
 
@@ -178,7 +178,7 @@ describe('Settings module', () => {
       });
 
       await expect(getSettings()).rejects.toThrow(
-        'Backup path is empty. Please configure a valid backup directory in settings.'
+        'Backup path is empty. Please configure a valid backup directory in settings.',
       );
     });
   });
@@ -235,11 +235,9 @@ describe('Settings module', () => {
       await getSettings('win32');
 
       expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Backup path length'));
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Backup path length')
-      );
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('exceeds 180 characters on Windows')
+        expect.stringContaining('exceeds 180 characters on Windows'),
       );
     });
 
@@ -287,10 +285,7 @@ describe('Settings module', () => {
       await setLastBackup(timestamp);
 
       expect(joplin.settings.setValue).toHaveBeenCalledTimes(1);
-      expect(joplin.settings.setValue).toHaveBeenCalledWith(
-        SettingKeys.LastBackup,
-        timestamp
-      );
+      expect(joplin.settings.setValue).toHaveBeenCalledWith(SettingKeys.LastBackup, timestamp);
     });
 
     it('setLastSnapshot updates lastSnapshot setting', async () => {
@@ -298,10 +293,7 @@ describe('Settings module', () => {
       await setLastSnapshot(snapshotName);
 
       expect(joplin.settings.setValue).toHaveBeenCalledTimes(1);
-      expect(joplin.settings.setValue).toHaveBeenCalledWith(
-        SettingKeys.LastSnapshot,
-        snapshotName
-      );
+      expect(joplin.settings.setValue).toHaveBeenCalledWith(SettingKeys.LastSnapshot, snapshotName);
     });
   });
 });

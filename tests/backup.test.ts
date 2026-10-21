@@ -144,18 +144,20 @@ describe('Backup Engine', () => {
     });
 
     it('returns max time across multiple pages', async () => {
-      (joplin.data.get as jest.Mock).mockImplementation(async (_path: string[], query?: { page?: number }) => {
-        if (query?.page === 1) {
+      (joplin.data.get as jest.Mock).mockImplementation(
+        async (_path: string[], query?: { page?: number }) => {
+          if (query?.page === 1) {
+            return {
+              items: [{ updated_time: 1000 }, { updated_time: 2500 }],
+              has_more: true,
+            };
+          }
           return {
-            items: [{ updated_time: 1000 }, { updated_time: 2500 }],
-            has_more: true,
+            items: [{ updated_time: 1500 }, { updated_time: 3000 }],
+            has_more: false,
           };
-        }
-        return {
-          items: [{ updated_time: 1500 }, { updated_time: 3000 }],
-          has_more: false,
-        };
-      });
+        },
+      );
 
       const maxTime = await getMaxNotesUpdatedTime();
       expect(maxTime).toBe(3000);
@@ -184,12 +186,14 @@ describe('Backup Engine', () => {
 
   describe('getAllFolderIds', () => {
     it('returns folder IDs across pages', async () => {
-      (joplin.data.get as jest.Mock).mockImplementation(async (_path: string[], query?: { page?: number }) => {
-        if (query?.page === 1) {
-          return { items: [{ id: 'f1' }], has_more: true };
-        }
-        return { items: [{ id: 'f2' }, { id: 'f3' }], has_more: false };
-      });
+      (joplin.data.get as jest.Mock).mockImplementation(
+        async (_path: string[], query?: { page?: number }) => {
+          if (query?.page === 1) {
+            return { items: [{ id: 'f1' }], has_more: true };
+          }
+          return { items: [{ id: 'f2' }, { id: 'f3' }], has_more: false };
+        },
+      );
 
       const ids = await getAllFolderIds();
       expect(ids).toEqual(['f1', 'f2', 'f3']);
@@ -269,7 +273,7 @@ describe('Backup Engine', () => {
             vol.writeFileSync(`${targetDir}/Folder 1/note1.md`, '# Note 1 Content');
             vol.writeFileSync(`${targetDir}/Folder 1/note2.md`, '# Note 2 Content');
           }
-        }
+        },
       );
 
       const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
@@ -289,7 +293,7 @@ describe('Backup Engine', () => {
         'exportFolders',
         ['folder-1', 'folder-2'],
         'raw',
-        `${BACKUP_ROOT}/${ACTIVE_DIR_NAME}`
+        `${BACKUP_ROOT}/${ACTIVE_DIR_NAME}`,
       );
 
       // Verify snapshot directory exists and staging directory is gone
@@ -306,11 +310,11 @@ describe('Backup Engine', () => {
       // Verify settings updated
       expect(joplin.settings.setValue).toHaveBeenCalledWith(
         SettingKeys.LastBackup,
-        fixedDate.toISOString()
+        fixedDate.toISOString(),
       );
       expect(joplin.settings.setValue).toHaveBeenCalledWith(
         SettingKeys.LastSnapshot,
-        '20261020T120000'
+        '20261020T120000',
       );
 
       // Verify lock was released
@@ -364,7 +368,7 @@ describe('Backup Engine', () => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/note1.md`, note1Content);
           vol.writeFileSync(`${targetDir}/note2.md`, '# New Note');
-        }
+        },
       );
 
       const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
@@ -387,7 +391,7 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/test.md`, '# Test');
-        }
+        },
       );
 
       const customName = '20261020T190000';
@@ -446,7 +450,7 @@ describe('Backup Engine', () => {
       // lastBackup setting was still updated
       expect(joplin.settings.setValue).toHaveBeenCalledWith(
         SettingKeys.LastBackup,
-        fixedDate.toISOString()
+        fixedDate.toISOString(),
       );
 
       // Lock file was released
@@ -478,7 +482,7 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/note1.md`, 'content');
-        }
+        },
       );
 
       const fixedDate = new Date(Date.UTC(2026, 9, 20, 16, 0, 0));
@@ -495,7 +499,7 @@ describe('Backup Engine', () => {
       (joplin.commands.execute as jest.Mock).mockImplementation(async () => {});
 
       await expect(runBackup()).rejects.toThrow(
-        /Export verification failed: export produced zero files/
+        /Export verification failed: export produced zero files/,
       );
 
       // Verify active dir was removed and lock was released
@@ -532,9 +536,12 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-        }
+        },
       );
-      const result = await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)), profileName: 'My Profile' });
+      const result = await runBackup({
+        now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)),
+        profileName: 'My Profile',
+      });
       expect(result.status).toBe('success');
       expect(vol.existsSync(`${BACKUP_ROOT}/My_Profile/20261020T120000`)).toBe(true);
     });
@@ -544,7 +551,7 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-        }
+        },
       );
       const origUnlink = memFsPromises.unlink;
       memFsPromises.unlink = (async () => {
@@ -559,7 +566,7 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-        }
+        },
       );
       const origRm = memFsPromises.rm;
       memFsPromises.rm = (async () => {
@@ -573,7 +580,7 @@ describe('Backup Engine', () => {
 
     it('cleans up active dir and releases lock when export command fails', async () => {
       (joplin.commands.execute as jest.Mock).mockRejectedValue(
-        new Error('Joplin internal error during export')
+        new Error('Joplin internal error during export'),
       );
 
       await expect(runBackup()).rejects.toThrow('Joplin internal error during export');
@@ -604,7 +611,7 @@ describe('Backup Engine', () => {
         async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
           vol.mkdirSync(targetDir, { recursive: true });
           vol.writeFileSync(`${targetDir}/file.txt`, 'data');
-        }
+        },
       );
 
       const fixedDate = new Date(Date.UTC(2026, 9, 20, 10, 0, 0));
@@ -636,10 +643,12 @@ describe('Backup Engine - verifyBackup', () => {
   });
 
   it('verifies a valid snapshot', async () => {
-    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
-      vol.mkdirSync(targetDir, { recursive: true });
-      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-    });
+    (joplin.commands.execute as jest.Mock).mockImplementation(
+      async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+      },
+    );
     const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
     await runBackup({ now: fixedDate });
 
@@ -650,10 +659,12 @@ describe('Backup Engine - verifyBackup', () => {
   });
 
   it('detects corrupted snapshot', async () => {
-    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
-      vol.mkdirSync(targetDir, { recursive: true });
-      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-    });
+    (joplin.commands.execute as jest.Mock).mockImplementation(
+      async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+      },
+    );
     const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
     await runBackup({ now: fixedDate });
 
@@ -682,10 +693,12 @@ describe('Backup Engine - verifyBackup', () => {
   });
 
   it('reports missing file as mismatch', async () => {
-    (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
-      vol.mkdirSync(targetDir, { recursive: true });
-      vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-    });
+    (joplin.commands.execute as jest.Mock).mockImplementation(
+      async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+      },
+    );
     const fixedDate = new Date(Date.UTC(2026, 9, 20, 12, 0, 0));
     await runBackup({ now: fixedDate });
 
@@ -732,7 +745,7 @@ describe('Backup reliability helpers', () => {
       retryTransient(async () => {
         calls++;
         throw new Error('fatal');
-      }, 3)
+      }, 3),
     ).rejects.toThrow('fatal');
     expect(calls).toBe(1);
   });
@@ -742,7 +755,7 @@ describe('Backup reliability helpers', () => {
       async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
         vol.mkdirSync(targetDir, { recursive: true });
         vol.writeFileSync(`${targetDir}/note.md`, 'hello');
-      }
+      },
     );
     await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)) });
     const result = await verifyBackup({ snapshotToVerify: '20261020T120000' });

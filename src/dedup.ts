@@ -5,7 +5,6 @@
  * where content is identical.
  */
 
-import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
 import { hardlinkOrCopy, toDedupeKey, mapWithConcurrency, computeFileSha256 } from './platform';
@@ -123,9 +122,8 @@ export async function dedup(
   }
 
   // 1. Walk all files in activeDir recursively (or reuse a pre-collected list)
-  const resolvedActiveFiles = activeFiles && activeFiles.length > 0
-    ? [...activeFiles]
-    : await collectFiles(activeDir);
+  const resolvedActiveFiles =
+    activeFiles && activeFiles.length > 0 ? [...activeFiles] : await collectFiles(activeDir);
   const activeFileList = resolvedActiveFiles.sort((a, b) => a.localeCompare(b));
 
   if (activeFileList.length === 0) {
@@ -139,7 +137,12 @@ export async function dedup(
   }
 
   // If no previous snapshot or manifest, keep all files as-is
-  if (!prevManifest || !lastSnapshotDir || !Array.isArray(prevManifest.files) || prevManifest.files.length === 0) {
+  if (
+    !prevManifest ||
+    !lastSnapshotDir ||
+    !Array.isArray(prevManifest.files) ||
+    prevManifest.files.length === 0
+  ) {
     result.unchanged = activeFileList.length;
     return result;
   }

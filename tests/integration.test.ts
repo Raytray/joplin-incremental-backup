@@ -5,8 +5,6 @@
  */
 
 import { Volume, createFsFromVolume } from 'memfs';
-import * as crypto from 'crypto';
-
 const vol = new Volume();
 const memFs = createFsFromVolume(vol);
 const memFsPromises = memFs.promises;
@@ -19,21 +17,22 @@ jest.mock('fs/promises', () => {
         if (prop === '__esModule') return true;
         return (memFsPromises as unknown as Record<string | symbol, unknown>)[prop];
       },
-    }
+    },
   );
 });
 
 import joplin from 'api';
 import { SettingKeys } from '../src/settings';
-import { runBackup, verifyBackup, LOCK_FILENAME, ACTIVE_DIR_NAME, LATEST_FILENAME } from '../src/backup';
-import { SNAPSHOT_PATTERN } from '../src/retention';
-import { Manifest, writeManifest } from '../src/manifest';
+import {
+  runBackup,
+  verifyBackup,
+  LOCK_FILENAME,
+  ACTIVE_DIR_NAME,
+  LATEST_FILENAME,
+} from '../src/backup';
+// (no extra imports needed)
 
 const BACKUP_ROOT = '/backups/joplin';
-
-function sha256Hex(content: string): string {
-  return crypto.createHash('sha256').update(content).digest('hex');
-}
 
 function resetFs(files: Record<string, string> = {}): void {
   vol.reset();
@@ -55,19 +54,23 @@ function setupMockSettings(custom: Partial<Record<string, unknown>> = {}): void 
     [SettingKeys.LastSnapshot]: '',
     ...custom,
   };
-  (joplin.settings.value as jest.Mock).mockImplementation((key: string) => Promise.resolve(defaults[key]));
+  (joplin.settings.value as jest.Mock).mockImplementation((key: string) =>
+    Promise.resolve(defaults[key]),
+  );
 }
 
 function setupJoplinExport(files: Record<string, string>): void {
-  (joplin.commands.execute as jest.Mock).mockImplementation(async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
-    vol.mkdirSync(targetDir, { recursive: true });
-    for (const [rel, content] of Object.entries(files)) {
-      const full = `${targetDir}/${rel}`;
-      const dir = full.substring(0, full.lastIndexOf('/'));
-      if (dir) vol.mkdirSync(dir, { recursive: true });
-      vol.writeFileSync(full, content);
-    }
-  });
+  (joplin.commands.execute as jest.Mock).mockImplementation(
+    async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+      vol.mkdirSync(targetDir, { recursive: true });
+      for (const [rel, content] of Object.entries(files)) {
+        const full = `${targetDir}/${rel}`;
+        const dir = full.substring(0, full.lastIndexOf('/'));
+        if (dir) vol.mkdirSync(dir, { recursive: true });
+        vol.writeFileSync(full, content);
+      }
+    },
+  );
 }
 
 describe('Integration', () => {

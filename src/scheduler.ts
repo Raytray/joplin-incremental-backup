@@ -8,10 +8,7 @@
 
 import joplin from 'api';
 import { runBackup } from './backup';
-import {
-  getSettings,
-  isSchedulerEnabled,
-} from './settings';
+import { getSettings, isSchedulerEnabled } from './settings';
 import { logger } from './logger';
 
 export const HOURS_TO_MS = 60 * 60 * 1000;
@@ -25,7 +22,8 @@ function intervalMs(hours: number): number {
 
 export async function executeScheduledBackup(): Promise<void> {
   try {
-    const runner = typeof runBackup === 'function' ? runBackup : async () => ({ status: 'success' as const });
+    const runner =
+      typeof runBackup === 'function' ? runBackup : async () => ({ status: 'success' as const });
     await runner();
   } catch (err) {
     // Lock contention or other failures are logged but never crash the timer.
@@ -58,8 +56,7 @@ export function startScheduler(intervalHours?: number): void | Promise<void> {
   const hours = intervalHours;
   lastIntervalHours = hours;
 
-  const enabled =
-    typeof isSchedulerEnabled === 'function' ? isSchedulerEnabled(hours) : hours > 0;
+  const enabled = typeof isSchedulerEnabled === 'function' ? isSchedulerEnabled(hours) : hours > 0;
   if (!enabled) {
     return;
   }
@@ -92,7 +89,7 @@ export async function initScheduler(): Promise<void> {
     const settings = fn ? await fn() : { backupInterval: lastIntervalHours };
     hours = (settings as { backupInterval?: number })?.backupInterval ?? 0;
   } catch {
-    hours = 0;
+    // keep default 0
   }
   lastIntervalHours = hours;
 
@@ -100,9 +97,7 @@ export async function initScheduler(): Promise<void> {
     await joplin.settings.onChange(async (event: { keys?: string[] }) => {
       const keys = Array.isArray(event?.keys) ? event.keys : [];
       const relevant =
-        keys.length === 0 ||
-        keys.includes('backupInterval') ||
-        keys.includes('enableAutoBackup');
+        keys.length === 0 || keys.includes('backupInterval') || keys.includes('enableAutoBackup');
       if (!relevant) return;
       try {
         const fn = typeof getSettings === 'function' ? getSettings : null;
@@ -116,8 +111,7 @@ export async function initScheduler(): Promise<void> {
     // settings.onChange may not be available in some environments
   }
 
-  const enabled =
-    typeof isSchedulerEnabled === 'function' ? isSchedulerEnabled(hours) : hours > 0;
+  const enabled = typeof isSchedulerEnabled === 'function' ? isSchedulerEnabled(hours) : hours > 0;
   if (enabled) {
     startScheduler(hours);
   } else {
@@ -130,9 +124,7 @@ export async function initScheduler(): Promise<void> {
 export async function onSettingsChanged(event?: { keys?: string[] }): Promise<void> {
   const keys = Array.isArray(event?.keys) ? event.keys : [];
   const relevant =
-    keys.length === 0 ||
-    keys.includes('backupInterval') ||
-    keys.includes('enableAutoBackup');
+    keys.length === 0 || keys.includes('backupInterval') || keys.includes('enableAutoBackup');
   if (!relevant) return;
   try {
     const fn = typeof getSettings === 'function' ? getSettings : null;
@@ -162,7 +154,9 @@ export class Scheduler {
     }
     this.stop();
     const classEnabled =
-      typeof isSchedulerEnabled === 'function' ? isSchedulerEnabled(this.intervalHours) : this.intervalHours > 0;
+      typeof isSchedulerEnabled === 'function'
+        ? isSchedulerEnabled(this.intervalHours)
+        : this.intervalHours > 0;
     if (!classEnabled) return;
     const delay = intervalMs(this.intervalHours);
     if (delay <= 0) return;

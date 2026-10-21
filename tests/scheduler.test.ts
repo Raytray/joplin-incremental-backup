@@ -1,6 +1,8 @@
 import joplin from 'api';
 
-jest.mock('../src/backup', () => ({ runBackup: jest.fn().mockResolvedValue({ status: 'success' }) }));
+jest.mock('../src/backup', () => ({
+  runBackup: jest.fn().mockResolvedValue({ status: 'success' }),
+}));
 
 import * as sched from '../src/scheduler';
 import { runBackup } from '../src/backup';
@@ -65,7 +67,8 @@ describe('Scheduler', () => {
   });
 
   it('overlapping run is handled', async () => {
-    const err: any = new Error('locked');
+    const err = new Error('locked') as Error & { code?: string };
+    err.code = 'EEXIST';
     err.code = 'EEXIST';
     (runBackup as jest.Mock).mockRejectedValueOnce(err);
     await expect(sched.executeScheduledBackup()).resolves.toBeUndefined();

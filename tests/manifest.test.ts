@@ -25,7 +25,6 @@ jest.mock('fs/promises', () => {
 });
 
 import {
-  FileEntry,
   Manifest,
   buildManifest,
   isValidManifest,

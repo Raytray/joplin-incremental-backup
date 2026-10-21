@@ -1,4 +1,4 @@
-import { formatMessage, logger, LOG_PREFIX } from '../src/logger';
+import { formatMessage, logger, log } from '../src/logger';
 
 describe('logger', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -36,7 +36,6 @@ describe('logger', () => {
   });
 
   it('falls back to console.log for unknown level', () => {
-    const { log } = require('../src/logger');
     const spy = jest.spyOn(console, 'log').mockImplementation(() => {});
     log('verbose' as never, 'msg');
     expect(spy).toHaveBeenCalled();

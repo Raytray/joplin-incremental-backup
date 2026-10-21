@@ -21,10 +21,7 @@ import { logger } from './logger';
  * On Windows, rename throws EEXIST if the destination already exists, so we
  * unlink the destination first and retry once.
  */
-export async function atomicWriteFile(
-  targetPath: string,
-  content: string,
-): Promise<void> {
+export async function atomicWriteFile(targetPath: string, content: string): Promise<void> {
   await fs.mkdir(nodePath.dirname(targetPath), { recursive: true });
   const tmpPath = targetPath + '.tmp';
   await fs.writeFile(tmpPath, content, 'utf8');
@@ -56,10 +53,7 @@ export async function atomicWriteFile(
  * be performed without relying on OS-level mtime (which can be unreliable
  * across platforms).
  */
-export async function acquireLock(
-  lockPath: string,
-  staleLimitMs: number,
-): Promise<void> {
+export async function acquireLock(lockPath: string, staleLimitMs: number): Promise<void> {
   await fs.mkdir(nodePath.dirname(lockPath), { recursive: true });
 
   const tryAcquire = async (): Promise<boolean> => {
@@ -98,9 +92,7 @@ export async function acquireLock(
   }
 
   // Still blocked.
-  const err: NodeJS.ErrnoException = new Error(
-    `Lock already held: ${lockPath}`,
-  );
+  const err: NodeJS.ErrnoException = new Error(`Lock already held: ${lockPath}`);
   err.code = 'EEXIST';
   throw err;
 }
@@ -123,12 +115,7 @@ export async function releaseLock(lockPath: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** Error codes that indicate hardlinks are not supported on this path/OS. */
-const HARDLINK_UNSUPPORTED_CODES = new Set([
-  'EPERM',
-  'ENOTSUP',
-  'EXDEV',
-  'ENOSYS',
-]);
+const HARDLINK_UNSUPPORTED_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']);
 
 /**
  * Attempt to create a hardlink from `src` to `dest`.
@@ -137,10 +124,7 @@ const HARDLINK_UNSUPPORTED_CODES = new Set([
  *
  * @returns `'hardlink'` when a hardlink was created, `'copy'` otherwise.
  */
-export async function hardlinkOrCopy(
-  src: string,
-  dest: string,
-): Promise<'hardlink' | 'copy'> {
+export async function hardlinkOrCopy(src: string, dest: string): Promise<'hardlink' | 'copy'> {
   // Ensure the destination directory exists.
   await fs.mkdir(nodePath.dirname(dest), { recursive: true });
 
@@ -188,9 +172,7 @@ export async function safeRmDir(dirPath: string): Promise<void> {
   } catch (err: unknown) {
     const nodeErr = err as NodeJS.ErrnoException;
     if (nodeErr.code === 'EBUSY') {
-      logger.warn(
-        `safeRmDir: could not remove ${dirPath} — directory busy (EBUSY). Skipping.`,
-      );
+      logger.warn(`safeRmDir: could not remove ${dirPath} — directory busy (EBUSY). Skipping.`);
     } else {
       throw err;
     }
@@ -240,7 +222,7 @@ export async function mapWithConcurrency<T, R>(
   concurrency: number,
   mapper: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results = new Array<R>(items.length);
+  const results = Array.from<R>({ length: items.length });
   if (items.length === 0) return results;
 
   const workerCount = Math.max(1, Math.min(concurrency || 1, items.length));

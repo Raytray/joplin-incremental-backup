@@ -48,21 +48,23 @@ Register all user-facing and hidden settings with the Joplin settings API.
 
 **Settings to register:**
 
-| Key | Type | Default | Notes |
-|---|---|---|---|
-| `backupPath` | `String` | `""` | Absolute path to backup root |
-| `backupRetention` | `Int` | `5` | Number of snapshots to keep |
-| `backupInterval` | `Int` | `24` | Auto-backup interval in hours; `0` = disabled |
-| `onlyOnChange` | `Bool` | `true` | Skip snapshot if nothing changed |
-| `lastBackup` | `String` | `""` | Hidden — ISO timestamp of last run |
-| `lastSnapshot` | `String` | `""` | Hidden — directory name of last snapshot |
+| Key               | Type     | Default | Notes                                         |
+| ----------------- | -------- | ------- | --------------------------------------------- |
+| `backupPath`      | `String` | `""`    | Absolute path to backup root                  |
+| `backupRetention` | `Int`    | `5`     | Number of snapshots to keep                   |
+| `backupInterval`  | `Int`    | `24`    | Auto-backup interval in hours; `0` = disabled |
+| `onlyOnChange`    | `Bool`   | `true`  | Skip snapshot if nothing changed              |
+| `lastBackup`      | `String` | `""`    | Hidden — ISO timestamp of last run            |
+| `lastSnapshot`    | `String` | `""`    | Hidden — directory name of last snapshot      |
 
 **Implementation:**
+
 - `registerSettings()` — call `joplin.settings.registerSection` + `joplin.settings.registerSettings`
 - `getSettings()` — return validated config object; throw descriptive error if `backupPath` is empty
 - Validate `backupPath` length ≤ 180 characters on Windows to avoid MAX_PATH issues (detect via `process.platform === 'win32'`)
 
 **Tests (`tests/settings.test.ts`):**
+
 - Mocked `joplin.settings.value` returns correct typed values
 - `getSettings()` throws when `backupPath` is empty
 - `backupInterval = 0` correctly signals disabled scheduler
@@ -95,11 +97,13 @@ safeRmDir(dirPath: string): Promise<void>
 ```
 
 **Rules:**
+
 - `atomicWriteFile`: write to `<target>.tmp`, then `fs.rename`; if rename throws `EEXIST`, unlink dest first, then rename
 - `acquireLock`: if lock file is older than `staleLimitMs`, delete it and retry once; if still blocked, throw
 - `toDedupeKey`: `relativePath.toLowerCase().replace(/\\/g, '/')`
 
 **Tests (`tests/platform.test.ts`) using `memfs`:**
+
 - `atomicWriteFile` overwrites existing file without error on all simulated platforms
 - `acquireLock` throws `EEXIST` when lock already held; succeeds after stale timeout
 - `hardlinkOrCopy` returns `'copy'` when `fs.link` throws `EPERM`
@@ -115,16 +119,16 @@ Track snapshot state and per-file integrity data.
 
 ```typescript
 interface FileEntry {
-  path: string;      // relative path within snapshot
+  path: string; // relative path within snapshot
   size: number;
   sha256: string;
 }
 
 interface Manifest {
-  snapshotId: string;        // ISO timestamp string
-  createdAt: number;         // Unix ms
+  snapshotId: string; // ISO timestamp string
+  createdAt: number; // Unix ms
   joplinVersion: string;
-  lastChangeTime: number;    // last detected data change (Unix ms)
+  lastChangeTime: number; // last detected data change (Unix ms)
   fileCount: number;
   files: FileEntry[];
   deduplication: 'hardlink' | 'copy' | 'none';
@@ -132,11 +136,13 @@ interface Manifest {
 ```
 
 **Functions:**
+
 - `readManifest(snapshotDir)` — parse `manifest.json`; return `null` if absent or malformed
 - `writeManifest(snapshotDir, manifest)` — use `atomicWriteFile` from `platform.ts`
 - `buildManifest(snapshotDir, meta)` — walk directory, compute SHA-256 per file, return complete `Manifest`
 
 **Tests (`tests/manifest.test.ts`) using `memfs`:**
+
 - Returns `null` for missing or malformed `manifest.json`
 - Round-trips correctly (write → read → equals original)
 - `buildManifest` produces correct `fileCount` and SHA-256 hashes for seeded virtual files
@@ -148,6 +154,7 @@ interface Manifest {
 Replace files in the active export with hardlinks to the previous snapshot where content is identical.
 
 **Algorithm:**
+
 1. Walk all files in `activeDir` recursively
 2. Compute SHA-256 for each file
 3. Normalize relative path via `toDedupeKey` (from `platform.ts`)
@@ -160,6 +167,7 @@ Replace files in the active export with hardlinks to the previous snapshot where
 **Returns:** `{ hardlinked: number, copied: number, unchanged: number }`
 
 **Tests (`tests/dedup.test.ts`) using `memfs`:**
+
 - Identical file gets hardlinked; `hardlinked` count increments
 - Changed file is kept; `unchanged` count increments
 - New file (no prior match) is kept; `unchanged` count increments
@@ -173,12 +181,14 @@ Replace files in the active export with hardlinks to the previous snapshot where
 Enforce the snapshot retention limit after each successful backup.
 
 **Functions:**
+
 - `listSnapshots(backupRoot)` — return snapshot directory names sorted oldest-first (match pattern `^\d{8}T\d{6}$`)
 - `pruneSnapshots(backupRoot, retentionCount)` — delete oldest snapshots until count ≤ `retentionCount`; use `safeRmDir` from `platform.ts`
 
 **Hardlink pruning note:** deleting an old snapshot directory only removes that directory's entries. Files still hardlinked by newer snapshots remain intact — this is the correct behavior and requires no special handling.
 
 **Tests (`tests/retention.test.ts`) using `memfs`:**
+
 - 10 snapshots + `retentionCount = 5` → 5 oldest deleted, 5 newest remain
 - `retentionCount = 5` with only 3 snapshots → zero deletions
 - Snapshot directories not matching the timestamp pattern are ignored
@@ -214,6 +224,7 @@ safeRmDir(_joplin_active_) (finally block — clean up on failure)
 ```
 
 **Tests (`tests/backup.test.ts`):**
+
 - Happy path: mock export produces files → snapshot directory created, `latest.txt` written, manifest present
 - `onlyOnChange`: no new `updated_time` → function returns early, no new snapshot directory
 - Export produces zero files → error thrown, active dir cleaned up, lock released
@@ -226,22 +237,27 @@ safeRmDir(_joplin_active_) (finally block — clean up on failure)
 Wire backup execution into Joplin's UI and background timer.
 
 **Commands to register:**
+
 - `joplin.commands.register('CreateIncrementalBackup')` — calls `runBackup()`, shows completion/error dialog
 - `joplin.commands.register('VerifyIncrementalBackup')` — reads `latest.txt`, parses manifest, checks each file's SHA-256 matches recorded hash, reports results
 
 **Menu items:**
+
 - Add both commands under `Tools` menu via `joplin.views.menuItems.create`
 
 **Scheduler (`src/scheduler.ts`):**
+
 - On `onStart`: if `backupInterval > 0`, set interval timer (`backupInterval` hours)
 - `joplin.settings.onChange` listener: clear and reset timer whenever `backupInterval` or `enableAutoBackup` changes
 - Guard against overlapping runs via the lock (backup naturally self-serializes)
 
 **Notifications:**
+
 - On success: `joplin.views.dialogs` toast or `console.info` log with snapshot path and stats
 - On failure: dialog with error message and path to clean up if needed
 
 **Tests (`tests/scheduler.test.ts`):**
+
 - `jest.useFakeTimers()`: advance clock by `backupInterval` hours → `runBackup` called once
 - Setting change resets timer: old interval cancelled, new interval registered
 - Overlapping manual + scheduled run: second call exits immediately (lock held)
@@ -254,18 +270,19 @@ End-to-end tests using fully mocked Joplin API + `memfs`.
 
 **Test scenarios:**
 
-| Scenario | Assert |
-|---|---|
-| First run (no previous snapshot) | Snapshot dir created, `latest.txt` written, manifest has correct file count |
-| Second run, no changes (`onlyOnChange = true`) | No new snapshot dir; `lastBackup` updated |
-| Third run with one changed note | New snapshot; changed file is new; unchanged files are hardlinked |
-| Deleted note | New snapshot does not contain deleted note's file |
-| Retention overflow (6 snapshots, limit 5) | Oldest snapshot dir removed |
-| Verify command on valid snapshot | Reports ✅ all files match |
-| Verify command on corrupted snapshot | Reports ❌ specific file hash mismatch |
-| Lock held during second run | Second run returns error immediately without creating partial snapshot |
+| Scenario                                       | Assert                                                                      |
+| ---------------------------------------------- | --------------------------------------------------------------------------- |
+| First run (no previous snapshot)               | Snapshot dir created, `latest.txt` written, manifest has correct file count |
+| Second run, no changes (`onlyOnChange = true`) | No new snapshot dir; `lastBackup` updated                                   |
+| Third run with one changed note                | New snapshot; changed file is new; unchanged files are hardlinked           |
+| Deleted note                                   | New snapshot does not contain deleted note's file                           |
+| Retention overflow (6 snapshots, limit 5)      | Oldest snapshot dir removed                                                 |
+| Verify command on valid snapshot               | Reports ✅ all files match                                                  |
+| Verify command on corrupted snapshot           | Reports ❌ specific file hash mismatch                                      |
+| Lock held during second run                    | Second run returns error immediately without creating partial snapshot      |
 
 **Validation checklist:**
+
 - [ ] `npm test` passes with ≥ 85% coverage on `backup.ts`, `manifest.ts`, `dedup.ts`, `retention.ts`, `platform.ts`
 - [ ] First run produces full snapshot and `latest.txt`
 - [ ] Second run with no changes skips snapshot creation

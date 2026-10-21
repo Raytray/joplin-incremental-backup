@@ -162,9 +162,11 @@ describe('Deduplication Engine (dedup)', () => {
 
       // Mock fs.promises.link to throw EPERM simulating unsupported hardlinks
       const origLink = memFsPromises.link;
-      memFsPromises.link = jest.fn().mockRejectedValue(
-        Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' }),
-      ) as typeof memFsPromises.link;
+      memFsPromises.link = jest
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('EPERM: operation not permitted, link'), { code: 'EPERM' }),
+        ) as typeof memFsPromises.link;
 
       try {
         const res = await dedup(ACTIVE_DIR, PREV_DIR);
@@ -415,9 +417,11 @@ describe('Deduplication Engine (dedup)', () => {
       });
 
       const origUnlink = memFsPromises.unlink;
-      memFsPromises.unlink = jest.fn().mockRejectedValue(
-        Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }),
-      ) as typeof memFsPromises.unlink;
+      memFsPromises.unlink = jest
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' }),
+        ) as typeof memFsPromises.unlink;
 
       try {
         const res = await dedup(ACTIVE_DIR, PREV_DIR);
@@ -443,9 +447,11 @@ describe('Deduplication Engine (dedup)', () => {
 
       // Mock link to throw an unexpected error not in HARDLINK_UNSUPPORTED_CODES, e.g. EIO
       const origLink = memFsPromises.link;
-      memFsPromises.link = jest.fn().mockRejectedValue(
-        Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }),
-      ) as typeof memFsPromises.link;
+      memFsPromises.link = jest
+        .fn()
+        .mockRejectedValue(
+          Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }),
+        ) as typeof memFsPromises.link;
 
       try {
         const res = await dedup(ACTIVE_DIR, PREV_DIR);

@@ -130,9 +130,11 @@ describe('listSnapshots', () => {
 
   it('rethrows unexpected non-ENOENT errors from readdir', async () => {
     const origReaddir = memFsPromises.readdir;
-    memFsPromises.readdir = jest.fn().mockRejectedValueOnce(
-      Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
-    ) as typeof memFsPromises.readdir;
+    memFsPromises.readdir = jest
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+      ) as typeof memFsPromises.readdir;
 
     await expect(listSnapshots(BACKUP_ROOT)).rejects.toMatchObject({
       code: 'EACCES',
@@ -220,11 +222,7 @@ describe('pruneSnapshots', () => {
   });
 
   it('performs zero deletions when snapshot count is less than retentionCount (3 snapshots, retention 5)', async () => {
-    const snapshotNames = [
-      '20261017T100000',
-      '20261018T100000',
-      '20261019T100000',
-    ];
+    const snapshotNames = ['20261017T100000', '20261018T100000', '20261019T100000'];
 
     for (const name of snapshotNames) {
       createSnapshotDir(name, { 'note.md': `content of ${name}` });
@@ -239,11 +237,7 @@ describe('pruneSnapshots', () => {
   });
 
   it('performs zero deletions when snapshot count equals retentionCount', async () => {
-    const snapshotNames = [
-      '20261017T100000',
-      '20261018T100000',
-      '20261019T100000',
-    ];
+    const snapshotNames = ['20261017T100000', '20261018T100000', '20261019T100000'];
 
     for (const name of snapshotNames) {
       createSnapshotDir(name);
@@ -320,9 +314,7 @@ describe('pruneSnapshots', () => {
     expect(vol.existsSync(`${BACKUP_ROOT}/20261013T100000`)).toBe(true);
     expect(vol.existsSync(`${BACKUP_ROOT}/20261014T100000`)).toBe(true);
 
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('EBUSY'),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('EBUSY'));
 
     warnSpy.mockRestore();
   });
@@ -374,9 +366,9 @@ describe('pruneSnapshots', () => {
       createSnapshotDir(name);
     }
 
-    jest.spyOn(platform, 'safeRmDir').mockRejectedValueOnce(
-      Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
-    );
+    jest
+      .spyOn(platform, 'safeRmDir')
+      .mockRejectedValueOnce(Object.assign(new Error('Permission denied'), { code: 'EACCES' }));
 
     await expect(pruneSnapshots(BACKUP_ROOT, 1)).rejects.toMatchObject({
       code: 'EACCES',

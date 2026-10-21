@@ -21,12 +21,7 @@ import * as fs from 'fs/promises';
 import * as nodePath from 'path';
 import * as crypto from 'crypto';
 import joplin from 'api';
-import {
-  getSettings,
-  setLastBackup,
-  setLastSnapshot,
-  BackupSettings,
-} from './settings';
+import { getSettings, setLastBackup, setLastSnapshot, BackupSettings } from './settings';
 import {
   acquireLock,
   releaseLock,
@@ -35,23 +30,14 @@ import {
   ensureBackupRoot,
   checkDiskSpace,
 } from './platform';
-import {
-  buildManifest,
-  writeManifest,
-  readManifest,
-  Manifest,
-} from './manifest';
+import { buildManifest, writeManifest, readManifest, Manifest } from './manifest';
 import {
   dedup,
   collectFiles as collectActiveFiles,
   getDeduplicationMode,
   DedupResult,
 } from './dedup';
-import {
-  pruneSnapshots,
-  listSnapshots,
-  SNAPSHOT_PATTERN,
-} from './retention';
+import { pruneSnapshots, listSnapshots, SNAPSHOT_PATTERN } from './retention';
 import { logger } from './logger';
 
 export const LOCK_FILENAME = '.backup.lock';
@@ -153,7 +139,8 @@ export async function getMaxNotesUpdatedTime(): Promise<number> {
     if (response && Array.isArray(response.items)) {
       for (const item of response.items) {
         if (item && item.updated_time !== undefined && item.updated_time !== null) {
-          const num = typeof item.updated_time === 'number' ? item.updated_time : Number(item.updated_time);
+          const num =
+            typeof item.updated_time === 'number' ? item.updated_time : Number(item.updated_time);
           if (!isNaN(num) && num > maxTime) {
             maxTime = num;
           }
@@ -206,7 +193,7 @@ export async function getAllFolderIds(): Promise<string[]> {
  */
 export async function resolveLastSnapshot(
   backupRoot: string,
-  preferredSnapshotName?: string
+  preferredSnapshotName?: string,
 ): Promise<{ name: string; dir: string } | null> {
   // 1. Try preferred snapshot name (from settings.lastSnapshot)
   if (preferredSnapshotName && preferredSnapshotName.trim()) {
@@ -382,7 +369,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     // Deduplicate against last snapshot
     const lastSnapshotDir = lastSnapshotInfo ? lastSnapshotInfo.dir : undefined;
-    const dedupStats: DedupResult = await dedup(activeDir, lastSnapshotDir, lastManifest, activeFileList);
+    const dedupStats: DedupResult = await dedup(
+      activeDir,
+      lastSnapshotDir,
+      lastManifest,
+      activeFileList,
+    );
 
     // Prepare timestamp and snapshot naming
     const now = options.now ?? new Date();
@@ -398,13 +390,17 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
 
     // Build and atomically write manifest in activeDir
-    const manifest = await buildManifest(activeDir, {
-      snapshotId: snapshotName,
-      createdAt: now.getTime(),
-      joplinVersion,
-      lastChangeTime: maxUpdatedTime,
-      deduplication: getDeduplicationMode(dedupStats),
-    }, activeFileList);
+    const manifest = await buildManifest(
+      activeDir,
+      {
+        snapshotId: snapshotName,
+        createdAt: now.getTime(),
+        joplinVersion,
+        lastChangeTime: maxUpdatedTime,
+        deduplication: getDeduplicationMode(dedupStats),
+      },
+      activeFileList,
+    );
     await writeManifest(activeDir, manifest);
 
     // Move staging directory activeDir to final snapshotDir

@@ -65,7 +65,7 @@ declare module 'api' {
       id: string,
       commandName: string,
       location: unknown,
-      options?: Record<string, unknown>
+      options?: Record<string, unknown>,
     ): Promise<void>;
   }
 

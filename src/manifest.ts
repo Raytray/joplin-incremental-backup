@@ -101,10 +101,7 @@ export async function readManifest(snapshotDir: string): Promise<Manifest | null
  * Atomically write `manifest` to `manifest.json` in `snapshotDir`.
  * Uses `atomicWriteFile` from `platform.ts` for crash and cross-platform safety.
  */
-export async function writeManifest(
-  snapshotDir: string,
-  manifest: Manifest,
-): Promise<void> {
+export async function writeManifest(snapshotDir: string, manifest: Manifest): Promise<void> {
   const manifestPath = nodePath.join(snapshotDir, MANIFEST_FILENAME);
   const content = JSON.stringify(manifest, null, 2);
   await atomicWriteFile(manifestPath, content);
@@ -114,10 +111,7 @@ export async function writeManifest(
  * Recursively walk `dir` and collect file entries with SHA-256 digests.
  * Ignores `manifest.json` and temporary `.tmp` files.
  */
-async function collectFilePaths(
-  dir: string,
-  baseDir: string = dir,
-): Promise<string[]> {
+async function collectFilePaths(dir: string): Promise<string[]> {
   const entries = await fs.readdir(dir);
   const paths: string[] = [];
 
@@ -130,7 +124,7 @@ async function collectFilePaths(
     const stat = await fs.stat(fullPath);
 
     if (stat.isDirectory()) {
-      const nested = await collectFilePaths(fullPath, baseDir);
+      const nested = await collectFilePaths(fullPath);
       paths.push(...nested);
     } else if (stat.isFile()) {
       paths.push(fullPath);
@@ -140,11 +134,8 @@ async function collectFilePaths(
   return paths;
 }
 
-async function collectFiles(
-  dir: string,
-  baseDir: string = dir,
-): Promise<FileEntry[]> {
-  const filePaths = await collectFilePaths(dir, baseDir);
+export async function collectFiles(dir: string, baseDir: string = dir): Promise<FileEntry[]> {
+  const filePaths = await collectFilePaths(dir);
 
   // Hash files in parallel with bounded concurrency
   const entries = await mapWithConcurrency(filePaths, 4, async (fullPath) => {
@@ -162,10 +153,7 @@ async function collectFiles(
   return entries;
 }
 
-async function collectFilesFromPaths(
-  filePaths: string[],
-  baseDir: string,
-): Promise<FileEntry[]> {
+async function collectFilesFromPaths(filePaths: string[], baseDir: string): Promise<FileEntry[]> {
   return mapWithConcurrency(filePaths, 4, async (fullPath) => {
     const stat = await fs.stat(fullPath);
     const sha256 = await computeFileSha256(fullPath);

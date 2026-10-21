@@ -12,7 +12,7 @@ async function handleCreateIncrementalBackup(): Promise<void> {
     const result = await runBackup();
     if (result.status === 'skipped') {
       await joplin.views.dialogs.showMessageBox(
-        `Backup skipped: ${result.skippedReason ?? 'No changes detected'}`
+        `Backup skipped: ${result.skippedReason ?? 'No changes detected'}`,
       );
       return;
     }
@@ -66,13 +66,13 @@ joplin.plugins.register({
     await joplin.views.menuItems.create(
       'createIncrementalBackupMenuItem',
       'CreateIncrementalBackup',
-      'tools'
+      'tools',
     );
 
     await joplin.views.menuItems.create(
       'verifyIncrementalBackupMenuItem',
       'VerifyIncrementalBackup',
-      'tools'
+      'tools',
     );
 
     await initScheduler();

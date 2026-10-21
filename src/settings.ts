@@ -30,7 +30,7 @@ export interface BackupSettings {
  */
 export function validateBackupPath(
   backupPath: string,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
 ): void {
   if (!backupPath || !backupPath.trim()) {
     throw new Error('Backup path is empty. Please configure a valid backup directory in settings.');
@@ -40,7 +40,7 @@ export function validateBackupPath(
     logger.warn(
       `Backup path length (${backupPath.length}) exceeds ` +
         `${WINDOWS_MAX_PATH_LIMIT} characters on Windows. Long path names may cause issues ` +
-        `during backup file operations.`
+        `during backup file operations.`,
     );
   }
 }
@@ -51,9 +51,7 @@ export function validateBackupPath(
  */
 export function isSchedulerEnabled(settingsOrInterval: BackupSettings | number): boolean {
   const interval =
-    typeof settingsOrInterval === 'number'
-      ? settingsOrInterval
-      : settingsOrInterval.backupInterval;
+    typeof settingsOrInterval === 'number' ? settingsOrInterval : settingsOrInterval.backupInterval;
   return interval > 0;
 }
 
@@ -126,7 +124,7 @@ export async function registerSettings(): Promise<void> {
  * Throws if backupPath is empty.
  */
 export async function getSettings(
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
 ): Promise<BackupSettings> {
   const [
     backupPathVal,

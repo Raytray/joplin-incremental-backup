@@ -102,9 +102,11 @@ describe('atomicWriteFile', () => {
   it('propagates non-EEXIST rename errors', async () => {
     // Simulate a rename that throws EPERM (not EEXIST).
     const origRename = memFsPromises.rename;
-    memFsPromises.rename = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EPERM'), { code: 'EPERM' }),
-    ) as typeof memFsPromises.rename;
+    memFsPromises.rename = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EPERM'), { code: 'EPERM' }),
+      ) as typeof memFsPromises.rename;
 
     await expect(atomicWriteFile('/tmp/x.txt', 'data')).rejects.toMatchObject({
       code: 'EPERM',
@@ -156,9 +158,11 @@ describe('acquireLock / releaseLock', () => {
 
   it('propagates unexpected error from open when acquiring lock', async () => {
     const origOpen = memFsPromises.open;
-    memFsPromises.open = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EACCES'), { code: 'EACCES' }),
-    ) as typeof memFsPromises.open;
+    memFsPromises.open = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+      ) as typeof memFsPromises.open;
 
     await expect(acquireLock(LOCK, STALE_MS)).rejects.toMatchObject({
       code: 'EACCES',
@@ -178,9 +182,11 @@ describe('acquireLock / releaseLock', () => {
 
   it('rethrows unexpected error on releaseLock', async () => {
     const origUnlink = memFsPromises.unlink;
-    memFsPromises.unlink = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EACCES'), { code: 'EACCES' }),
-    ) as typeof memFsPromises.unlink;
+    memFsPromises.unlink = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+      ) as typeof memFsPromises.unlink;
 
     await expect(releaseLock(LOCK)).rejects.toMatchObject({
       code: 'EACCES',
@@ -208,9 +214,11 @@ describe('hardlinkOrCopy', () => {
 
   it('returns "copy" when fs.link throws EPERM', async () => {
     const origLink = memFsPromises.link;
-    memFsPromises.link = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EPERM'), { code: 'EPERM' }),
-    ) as typeof memFsPromises.link;
+    memFsPromises.link = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EPERM'), { code: 'EPERM' }),
+      ) as typeof memFsPromises.link;
 
     const result = await hardlinkOrCopy(SRC, DEST);
     expect(result).toBe('copy');
@@ -220,9 +228,11 @@ describe('hardlinkOrCopy', () => {
 
   it('returns "copy" when fs.link throws ENOTSUP', async () => {
     const origLink = memFsPromises.link;
-    memFsPromises.link = jest.fn().mockRejectedValue(
-      Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP' }),
-    ) as typeof memFsPromises.link;
+    memFsPromises.link = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP' }),
+      ) as typeof memFsPromises.link;
 
     const result = await hardlinkOrCopy(SRC, DEST);
     expect(result).toBe('copy');
@@ -231,9 +241,11 @@ describe('hardlinkOrCopy', () => {
 
   it('returns "copy" when fs.link throws EXDEV (cross-device)', async () => {
     const origLink = memFsPromises.link;
-    memFsPromises.link = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EXDEV'), { code: 'EXDEV' }),
-    ) as typeof memFsPromises.link;
+    memFsPromises.link = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EXDEV'), { code: 'EXDEV' }),
+      ) as typeof memFsPromises.link;
 
     const result = await hardlinkOrCopy(SRC, DEST);
     expect(result).toBe('copy');
@@ -242,9 +254,11 @@ describe('hardlinkOrCopy', () => {
 
   it('rethrows unexpected errors from fs.link', async () => {
     const origLink = memFsPromises.link;
-    memFsPromises.link = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EIO'), { code: 'EIO' }),
-    ) as typeof memFsPromises.link;
+    memFsPromises.link = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EIO'), { code: 'EIO' }),
+      ) as typeof memFsPromises.link;
 
     await expect(hardlinkOrCopy(SRC, DEST)).rejects.toMatchObject({
       code: 'EIO',
@@ -281,9 +295,7 @@ describe('toDedupeKey', () => {
   });
 
   it('does not modify already-normalised lowercase paths', () => {
-    expect(toDedupeKey('notes/subfolder/note.md')).toBe(
-      'notes/subfolder/note.md',
-    );
+    expect(toDedupeKey('notes/subfolder/note.md')).toBe('notes/subfolder/note.md');
   });
 });
 
@@ -309,14 +321,14 @@ describe('safeRmDir', () => {
   it('warns instead of throwing on EBUSY', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const origRm = memFsPromises.rm;
-    memFsPromises.rm = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EBUSY'), { code: 'EBUSY' }),
-    ) as typeof memFsPromises.rm;
+    memFsPromises.rm = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EBUSY'), { code: 'EBUSY' }),
+      ) as typeof memFsPromises.rm;
 
     await expect(safeRmDir('/tmp/busy')).resolves.toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining('EBUSY'),
-    );
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('EBUSY'));
 
     memFsPromises.rm = origRm;
     warnSpy.mockRestore();
@@ -324,9 +336,11 @@ describe('safeRmDir', () => {
 
   it('rethrows non-EBUSY errors', async () => {
     const origRm = memFsPromises.rm;
-    memFsPromises.rm = jest.fn().mockRejectedValue(
-      Object.assign(new Error('EACCES'), { code: 'EACCES' }),
-    ) as typeof memFsPromises.rm;
+    memFsPromises.rm = jest
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+      ) as typeof memFsPromises.rm;
 
     await expect(safeRmDir('/tmp/noperm')).rejects.toMatchObject({
       code: 'EACCES',
@@ -391,6 +405,8 @@ describe('checkDiskSpace', () => {
   it('throws when insufficient space requested', async () => {
     vol.reset();
     vol.mkdirSync('/tmp', { recursive: true });
-    await expect(checkDiskSpace('/tmp', Number.MAX_SAFE_INTEGER)).rejects.toThrow(/Insufficient disk space/);
+    await expect(checkDiskSpace('/tmp', Number.MAX_SAFE_INTEGER)).rejects.toThrow(
+      /Insufficient disk space/,
+    );
   });
 });

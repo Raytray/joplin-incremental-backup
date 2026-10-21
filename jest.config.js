@@ -11,11 +11,7 @@ module.exports = {
     '^api/types$': '<rootDir>/src/__mocks__/joplin.ts',
   },
   // Coverage collection excludes mocks and the thin entry point
-  collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/__mocks__/**',
-    '!src/index.ts',
-  ],
+  collectCoverageFrom: ['src/**/*.ts', '!src/__mocks__/**', '!src/index.ts'],
   coverageThreshold: {
     global: {
       branches: 85,
