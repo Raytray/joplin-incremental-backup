@@ -21,16 +21,16 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 
 The following features are planned (see [plan.md](./plan.md) for the full design):
 
-| Feature                                              | Status      |
-| ---------------------------------------------------- | ----------- |
-| Settings UI (path, interval, retention, skip-if-unchanged) | Planned  |
+| Feature                                                        | Status  |
+| -------------------------------------------------------------- | ------- |
+| Settings UI (path, interval, retention, skip-if-unchanged)     | Planned |
 | Scheduled auto-backup (`Tools > Options > Incremental Backup`) | Planned |
-| `Create backup now` command (Tools menu)             | Planned     |
-| `Verify last backup` command (Tools menu)            | Planned     |
-| Deduplicated snapshots with hardlinks + copy fallback | Planned    |
-| SHA-256 manifest and integrity verification          | Planned     |
-| Retention-based pruning                              | Planned     |
-| Multi-profile support (optional subfolder per profile) | Planned   |
+| `Create backup now` command (Tools menu)                       | Planned |
+| `Verify last backup` command (Tools menu)                      | Planned |
+| Deduplicated snapshots with hardlinks + copy fallback          | Planned |
+| SHA-256 manifest and integrity verification                    | Planned |
+| Retention-based pruning                                        | Planned |
+| Multi-profile support (optional subfolder per profile)         | Planned |
 
 ## How to use
 

@@ -247,7 +247,7 @@ Orchestrate one full backup run.
 
 **`resolveLastSnapshot(backupRoot, preferredSnapshotName?)`** → check settings.lastSnapshot, then `latest.txt`, then newest in backupRoot.
 
-**`getChangeFingerprint()`** → build a cheap fingerprint of current data so `onlyOnChange` detects *any* change, not just edits. Paginate `joplin.data.get(['notes'], { fields: ['id', 'updated_time'] })` to collect the max note `updated_time` **and the note count**, and paginate `joplin.data.get(['resources'], { fields: ['updated_time'] })` for the max resource `updated_time`. Return `{ maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime }`. This is required: deleting a note does not raise any surviving note's `updated_time`, and editing an attachment does not touch note `updated_time` — a max-note-`updated_time`-only check would silently skip both.
+**`getChangeFingerprint()`** → build a cheap fingerprint of current data so `onlyOnChange` detects _any_ change, not just edits. Paginate `joplin.data.get(['notes'], { fields: ['id', 'updated_time'] })` to collect the max note `updated_time` **and the note count**, and paginate `joplin.data.get(['resources'], { fields: ['updated_time'] })` for the max resource `updated_time`. Return `{ maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime }`. This is required: deleting a note does not raise any surviving note's `updated_time`, and editing an attachment does not touch note `updated_time` — a max-note-`updated_time`-only check would silently skip both.
 
 **`getAllFolderIds()`** → paginate `joplin.data.get(['folders'], { fields: ['id'] })`.
 
@@ -353,17 +353,17 @@ End-to-end tests using fully mocked Joplin API + `memfs`.
 
 **Scenarios:**
 
-| Scenario                                       | Assert                                                                  |
-| ---------------------------------------------- | ----------------------------------------------------------------------- |
-| First run (no previous snapshot)               | Snapshot dir created, `latest.txt` written, manifest file count correct |
-| Second run, no changes (`onlyOnChange = true`) | No new snapshot dir; `lastBackup` updated                               |
-| Third run with one changed note                | New snapshot; changed file new; unchanged files hardlinked              |
+| Scenario                                       | Assert                                                                                                              |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| First run (no previous snapshot)               | Snapshot dir created, `latest.txt` written, manifest file count correct                                             |
+| Second run, no changes (`onlyOnChange = true`) | No new snapshot dir; `lastBackup` updated                                                                           |
+| Third run with one changed note                | New snapshot; changed file new; unchanged files hardlinked                                                          |
 | Deleted note                                   | New snapshot lacks deleted note's file (fingerprint detects count change even when max `updated_time` is unchanged) |
-| Changed attachment/resource                    | New snapshot includes changed resource file (fingerprint detects resource `updated_time` change) |
-| Retention overflow (6 snapshots, limit 5)      | Oldest snapshot dir removed                                             |
-| Verify on valid snapshot                       | ✅ all files match                                                      |
-| Verify on corrupted snapshot                   | ❌ specific file hash mismatch                                          |
-| Lock held during second run                    | Second run errors immediately, no partial snapshot                      |
+| Changed attachment/resource                    | New snapshot includes changed resource file (fingerprint detects resource `updated_time` change)                    |
+| Retention overflow (6 snapshots, limit 5)      | Oldest snapshot dir removed                                                                                         |
+| Verify on valid snapshot                       | ✅ all files match                                                                                                  |
+| Verify on corrupted snapshot                   | ❌ specific file hash mismatch                                                                                      |
+| Lock held during second run                    | Second run errors immediately, no partial snapshot                                                                  |
 
 **Validation checklist:**
 
