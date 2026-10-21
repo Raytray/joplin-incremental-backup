@@ -82,7 +82,7 @@ function createManualTimers() {
      * fired again by the same sweep.
      */
     fireAll() {
-      for (const timer of [...timers]) {
+      for (const timer of timers.slice()) {
         if (!timer.cleared && !timer.fired) this.fire(timer);
       }
     },

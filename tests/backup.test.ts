@@ -30,7 +30,7 @@ import {
   runBackup,
   verifyBackup,
 } from '../src/backup';
-import { activeDirPath, snapshotDirPath } from '../src/backup';
+import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
