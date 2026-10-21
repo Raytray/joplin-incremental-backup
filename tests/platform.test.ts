@@ -11,16 +11,20 @@ import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import {
   acquireLock,
+  assertDiskSpace,
   atomicWriteFile,
   checkDiskSpace,
   collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
   hardlinkOrCopy,
+  hasFreshLock,
   mapWithConcurrency,
   releaseLock,
   safeRmDir,
   toDedupeKey,
+  toManifestKey,
+  touchLock,
 } from '../src/platform';
 import { logger } from '../src/logger';
 
@@ -75,6 +79,78 @@ describe('acquireLock / releaseLock', () => {
 
   it('releaseLock ignores a missing lock', async () => {
     await expect(releaseLock(path.join(ROOT, 'missing.lock'))).resolves.toBeUndefined();
+  });
+
+  it('lets exactly one contender win a stale lock', async () => {
+    const lockPath = path.join(ROOT, '.backup.lock');
+    await fs.writeFile(lockPath, 'stale');
+    await fs.utimes(lockPath, new Date(0), new Date(0));
+
+    const results = await Promise.allSettled([
+      acquireLock(lockPath, 1_000),
+      acquireLock(lockPath, 1_000),
+      acquireLock(lockPath, 1_000),
+    ]);
+
+    const won = results.filter((result) => result.status === 'fulfilled');
+    const lost = results.filter((result) => result.status === 'rejected');
+    expect(won).toHaveLength(1);
+    expect(lost).toHaveLength(2);
+    for (const failure of lost) {
+      expect((failure as PromiseRejectedResult).reason).toMatchObject({ code: 'EEXIST' });
+    }
+  });
+
+  it('does not delete the winner lock when a stale lock is stolen', async () => {
+    const lockPath = path.join(ROOT, '.backup.lock');
+    await fs.writeFile(lockPath, 'stale');
+    await fs.utimes(lockPath, new Date(0), new Date(0));
+
+    await acquireLock(lockPath, 1_000);
+    const holder = await fs.readFile(lockPath, 'utf8');
+
+    // A second contender must not be able to take the fresh lock.
+    await expect(acquireLock(lockPath, 1_000)).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await fs.readFile(lockPath, 'utf8')).toBe(holder);
+  });
+
+  it('leaves no stale lock files behind after a steal', async () => {
+    const lockPath = path.join(ROOT, '.backup.lock');
+    await fs.writeFile(lockPath, 'stale');
+    await fs.utimes(lockPath, new Date(0), new Date(0));
+
+    await acquireLock(lockPath, 1_000);
+
+    const entries = await fs.readdir(ROOT);
+    expect(entries.filter((name) => name.includes('.stale.'))).toEqual([]);
+  });
+});
+
+describe('touchLock / hasFreshLock', () => {
+  it('refreshes the mtime of a held lock', async () => {
+    const lockPath = path.join(ROOT, '.backup.lock');
+    await acquireLock(lockPath, 60_000);
+    await fs.utimes(lockPath, new Date(0), new Date(0));
+
+    expect(await hasFreshLock(lockPath, 60_000)).toBe(false);
+
+    await touchLock(lockPath);
+
+    expect(await hasFreshLock(lockPath, 60_000)).toBe(true);
+    expect((await fs.stat(lockPath)).mtime.getTime()).toBeGreaterThan(0);
+  });
+
+  it('ignores a lock that no longer exists', async () => {
+    const lockPath = path.join(ROOT, 'missing.lock');
+    await expect(touchLock(lockPath)).resolves.toBeUndefined();
+    await expect(hasFreshLock(lockPath, 60_000)).resolves.toBe(false);
+  });
+});
+
+describe('toManifestKey', () => {
+  it('normalizes separators but preserves case', () => {
+    expect(toManifestKey('resources/Note.md')).toBe('resources/Note.md');
+    expect(toManifestKey('Note.md')).not.toBe(toManifestKey('note.md'));
   });
 });
 
@@ -215,6 +291,27 @@ describe('filesystem helpers', () => {
 
     await expect(checkDiskSpace(ROOT, 0)).rejects.toMatchObject({ code: 'EPERM' });
     statfsSpy.mockRestore();
+  });
+
+  it('assertDiskSpace passes when free space is above the threshold', async () => {
+    await expect(assertDiskSpace(ROOT, 0)).resolves.toBeGreaterThanOrEqual(0);
+  });
+
+  it('assertDiskSpace throws when free space is below the threshold', async () => {
+    await expect(assertDiskSpace(ROOT, Number.MAX_SAFE_INTEGER)).rejects.toThrow(
+      /Not enough free disk space/,
+    );
+  });
+
+  it('assertDiskSpace proceeds when the filesystem cannot be measured', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const statfsSpy = vi
+      .spyOn(fs, 'statfs')
+      .mockRejectedValueOnce(Object.assign(new Error('nope'), { code: 'ENOSYS' }));
+
+    await expect(assertDiskSpace(ROOT, Number.MAX_SAFE_INTEGER)).resolves.toBe(-1);
+    statfsSpy.mockRestore();
+    warn.mockRestore();
   });
 });
 

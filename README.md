@@ -15,7 +15,7 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 - **Skip unchanged backups** — if no note has been modified since the last snapshot, the backup is skipped entirely (can be disabled).
 - **Integrity verification** — every snapshot includes a `manifest.json` with the size and SHA-256 hash of every file. A verify command re-checks the whole snapshot and reports any missing or corrupted files.
 - **Crash-safe** — backups are staged in a temporary directory and atomically renamed into place when complete. An exclusive lock prevents overlapping runs, stale locks are recovered automatically, and leftover staging data is cleaned up on startup.
-- **Disk-space pre-flight** — checks available space before starting a backup.
+- **Disk-space pre-flight** — checks available space before starting a backup and aborts the run if the backup drive is below the minimum free-space threshold, so a full disk can't produce a truncated snapshot. (If free space can't be measured on a platform, the backup proceeds with a warning.)
 - **Export warnings surfaced** — if Joplin's exporter skips any item (e.g. still-encrypted notes), the warnings are logged and shown in the backup dialog so an incomplete snapshot isn't mistaken for a complete one.
 
 ## Features

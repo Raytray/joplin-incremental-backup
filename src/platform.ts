@@ -9,7 +9,8 @@ const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']);
 const BUSY_CODES = new Set(['EBUSY', 'EPERM']);
 
-function errorCode(error: unknown): string | undefined {
+/** Extract the `code` property of a Node.js system error, if any. */
+export function errorCode(error: unknown): string | undefined {
   if (typeof error === 'object' && error !== null && 'code' in error) {
     return String((error as { code?: unknown }).code);
   }
@@ -84,9 +85,60 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
 
   if (!stale) throw createLockError(lockPath);
 
-  await fs.rm(lockPath, { force: true });
+  // Steal the stale lock atomically. Renaming moves it out of the way in a
+  // single step, so exactly one contender can win: a second contender sees
+  // ENOENT and re-checks instead of deleting the winner's fresh lock.
+  const stalePath = `${lockPath}.stale.${process.pid}.${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await fs.rename(lockPath, stalePath);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') {
+      // Another contender already stole (or released) it; try once more.
+      if (await tryCreate()) return;
+      throw createLockError(lockPath);
+    }
+    throw error;
+  }
+
+  await fs.rm(stalePath, { force: true });
   if (await tryCreate()) return;
   throw createLockError(lockPath);
+}
+
+/**
+ * Refresh a held lock so a long-running backup is never mistaken for an
+ * abandoned one. The lock's mtime is what `acquireLock` uses to judge
+ * staleness, so writing the current timestamp is enough to renew it.
+ *
+ * The file is opened without `O_CREAT`: a lock that has been released or
+ * stolen in the meantime must not be resurrected by the heartbeat.
+ */
+export async function touchLock(lockPath: string): Promise<void> {
+  let handle;
+  try {
+    handle = await fs.open(lockPath, 'r+');
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return;
+    throw error;
+  }
+
+  try {
+    await handle.truncate(0);
+    await handle.write(new Date().toISOString(), 0, 'utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+/** True when a lock file exists and was refreshed within `staleLimitMs`. */
+export async function hasFreshLock(lockPath: string, staleLimitMs: number): Promise<boolean> {
+  try {
+    const stat = await fs.stat(lockPath);
+    return Date.now() - stat.mtime.getTime() <= staleLimitMs;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 export async function releaseLock(lockPath: string): Promise<void> {
@@ -116,6 +168,15 @@ export function toDedupeKey(relativePath: string): string {
   return relativePath.toLowerCase().replace(/\\/g, '/');
 }
 
+/**
+ * Normalized relative path used to key per-file data (hashes, sizes). Unlike
+ * `toDedupeKey` this preserves case, so two files that differ only in case
+ * stay distinct and never share a hash.
+ */
+export function toManifestKey(relativePath: string): string {
+  return relativePath.split(path.sep).join('/');
+}
+
 export async function safeRmDir(dirPath: string): Promise<void> {
   try {
     await fs.rm(dirPath, { recursive: true, force: true });
@@ -134,8 +195,10 @@ export async function ensureBackupRoot(backupRoot: string): Promise<void> {
 }
 
 /**
- * Return free bytes at `backupRoot`. Low space only warns; it never throws so a
- * backup is never blocked by a full disk. Returns `-1` when unavailable.
+ * Return free bytes at `backupRoot`, or `-1` when it cannot be determined.
+ * Only reports; callers decide whether low space is fatal (see
+ * `assertDiskSpace`). Unexpected stat failures are rethrown so real errors are
+ * not silently swallowed.
  */
 export async function checkDiskSpace(
   backupRoot: string,
@@ -158,6 +221,25 @@ export async function checkDiskSpace(
     }
     throw error;
   }
+}
+
+/**
+ * Throw when the backup root has less than `minFreeBytes` free. An unavailable
+ * filesystem (`-1`) is treated as "unknown, proceed" so a platform that cannot
+ * report free space is never blocked entirely.
+ */
+export async function assertDiskSpace(
+  backupRoot: string,
+  minFreeBytes: number = DEFAULT_MIN_FREE_BYTES,
+): Promise<number> {
+  const freeBytes = await checkDiskSpace(backupRoot, minFreeBytes);
+  if (freeBytes >= 0 && freeBytes < minFreeBytes) {
+    throw new Error(
+      `Not enough free disk space at "${backupRoot}": ${freeBytes} bytes free, ` +
+        `but at least ${minFreeBytes} bytes are required. Backup aborted.`,
+    );
+  }
+  return freeBytes;
 }
 
 /** Bounded worker pool; results preserve the input order. */

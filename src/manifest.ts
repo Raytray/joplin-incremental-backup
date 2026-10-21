@@ -5,7 +5,7 @@ import {
   collectFilesRecursive,
   computeFileSha256,
   mapWithConcurrency,
-  toDedupeKey,
+  toManifestKey,
 } from './platform';
 
 export const MANIFEST_FILENAME = 'manifest.json';
@@ -109,7 +109,7 @@ export async function writeManifest(snapshotDir: string, manifest: Manifest): Pr
 }
 
 function normalizeRelativePath(relativePath: string): string {
-  return relativePath.split(path.sep).join('/');
+  return toManifestKey(relativePath);
 }
 
 /** Recursively list files under `dir` as paths relative to `baseDir`. */
@@ -146,7 +146,7 @@ export async function buildManifest(
     async (relativePath): Promise<FileEntry> => {
       const absolutePath = path.join(snapshotDir, relativePath);
       const stats = await fs.stat(absolutePath);
-      const precomputed = precomputedHashes?.get(toDedupeKey(relativePath));
+      const precomputed = precomputedHashes?.get(toManifestKey(relativePath));
       const sha256 = precomputed ?? (await computeFileSha256(absolutePath));
       return { path: relativePath, size: stats.size, sha256 };
     },

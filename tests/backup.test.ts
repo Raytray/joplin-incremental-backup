@@ -10,8 +10,9 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import {
-  ACTIVE_DIR_NAME,
+  ACTIVE_DIR_PREFIX,
   collectActiveFiles,
+  createStagingDirName,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -19,7 +20,9 @@ import {
   getChangeFingerprint,
   isTransientExportError,
   LATEST_FILENAME,
+  listStagingDirs,
   LOCK_FILENAME,
+  recoverBackupDirs,
   resolveBackupRoot,
   resolveLastSnapshot,
   resolveUniqueSnapshotName,
@@ -125,6 +128,74 @@ describe('pure helpers', () => {
     expect(isTransientExportError(new Error('permission denied'))).toBe(false);
   });
 });
+
+describe('staging directories', () => {
+  it('creates a unique directory name per run', () => {
+    const first = createStagingDirName(FIXED_DATE);
+    const second = createStagingDirName(FIXED_DATE);
+
+    expect(first).not.toBe(second);
+    expect(first.startsWith(ACTIVE_DIR_PREFIX)).toBe(true);
+    expect(first).toMatch(/^_joplin_active_\d{8}T\d{6}_\d+_[a-z0-9]+$/);
+  });
+
+  it('lists only staging directories', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    await fs.mkdir(path.join(root, createStagingDirName()), { recursive: true });
+    await fs.mkdir(path.join(root, '20260102T030405'), { recursive: true });
+    await fs.writeFile(path.join(root, 'latest.txt'), 'x');
+
+    const staging = await listStagingDirs(root);
+
+    expect(staging).toHaveLength(1);
+    expect(staging[0].startsWith(ACTIVE_DIR_PREFIX)).toBe(true);
+  });
+
+  it('leaves no staging directory behind after a run', async () => {
+    await run();
+
+    expect(await listStagingDirs(path.join(BACKUP_ROOT, PROFILE))).toEqual([]);
+  });
+});
+
+describe('recoverBackupDirs', () => {
+  it('removes stale staging directories', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const stale = path.join(root, createStagingDirName());
+    await fs.mkdir(stale, { recursive: true });
+    await fs.writeFile(path.join(stale, 'leftover.md'), 'stale');
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    await fs.utimes(stale, old, old);
+
+    await recoverBackupDirs({ backupRoot: root });
+
+    await expect(fs.stat(stale)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps a staging directory that was touched recently', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const fresh = path.join(root, createStagingDirName());
+    await fs.mkdir(fresh, { recursive: true });
+
+    await recoverBackupDirs({ backupRoot: root });
+
+    await expect(fs.stat(fresh)).resolves.toBeDefined();
+  });
+
+  it('keeps everything when another backup holds a fresh lock', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const staging = path.join(root, createStagingDirName());
+    await fs.mkdir(staging, { recursive: true });
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    await fs.utimes(staging, old, old);
+    await fs.writeFile(path.join(root, LOCK_FILENAME), new Date().toISOString());
+
+    await recoverBackupDirs({ backupRoot: root });
+
+    await expect(fs.stat(staging)).resolves.toBeDefined();
+    await expect(fs.stat(path.join(root, LOCK_FILENAME))).resolves.toBeDefined();
+  });
+});
 describe('getChangeFingerprint', () => {
   it('collects max note time, note count, and max resource time', async () => {
     setData({
@@ -213,7 +284,7 @@ describe('resolveLastSnapshot', () => {
 
 describe('collectActiveFiles', () => {
   it('lists relative paths', async () => {
-    const dir = path.join(BACKUP_ROOT, PROFILE, ACTIVE_DIR_NAME);
+    const dir = path.join(BACKUP_ROOT, PROFILE, createStagingDirName());
     await fs.mkdir(path.join(dir, 'sub'), { recursive: true });
     await fs.writeFile(path.join(dir, 'a.md'), 'a');
     await fs.writeFile(path.join(dir, 'sub', 'b.md'), 'b');
@@ -272,9 +343,9 @@ describe('runBackup — happy path', () => {
   it('cleans the staging dir and releases the lock afterwards', async () => {
     await run();
 
-    const activeDir = activeDirPath(path.join(BACKUP_ROOT, PROFILE));
-    await expect(fs.stat(activeDir)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(fs.stat(path.join(BACKUP_ROOT, PROFILE, LOCK_FILENAME))).rejects.toMatchObject({
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    expect(await listStagingDirs(root)).toEqual([]);
+    await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });
@@ -348,13 +419,26 @@ describe('runBackup — onlyOnChange', () => {
 });
 
 describe('runBackup — failures', () => {
+  it('aborts before locking or snapshotting when disk space is insufficient', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+
+    await expect(run({ minFreeBytes: Number.MAX_SAFE_INTEGER })).rejects.toThrow(
+      /Not enough free disk space/,
+    );
+
+    // The gate runs before the lock is taken and before any export.
+    await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await listStagingDirs(root)).toEqual([]);
+    expect(mockState.executedCommands.some((c) => c.name === 'exportFolders')).toBe(false);
+  });
+
   it('errors and cleans up when the export produces no files', async () => {
     stubExport([]);
 
     await expect(run()).rejects.toThrow(/no files/);
 
     const root = path.join(BACKUP_ROOT, PROFILE);
-    await expect(fs.stat(activeDirPath(root))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await listStagingDirs(root)).toEqual([]);
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 

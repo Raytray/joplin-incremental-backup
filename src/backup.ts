@@ -1,17 +1,21 @@
 import fs from 'fs/promises';
 import path from 'path';
+import type { Dirent } from 'fs';
 import joplin from 'api';
 import { logger } from './logger';
 import {
   acquireLock,
+  assertDiskSpace,
   atomicWriteFile,
-  checkDiskSpace,
   collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
+  errorCode,
+  hasFreshLock,
   mapWithConcurrency,
   releaseLock,
   safeRmDir,
+  touchLock,
 } from './platform';
 import { buildManifest, readManifest, writeManifest } from './manifest';
 import type { ChangeFingerprint, DeduplicationMode, ManifestMeta } from './manifest';
@@ -22,7 +26,11 @@ import { getSettings, setLastBackup, setLastSnapshot, SETTING_KEYS } from './set
 import type { Settings } from './settings';
 
 export const LOCK_FILENAME = '.backup.lock';
-export const ACTIVE_DIR_NAME = '_joplin_active_';
+/**
+ * Prefix of the per-run staging directories. The name is unique per run so two
+ * concurrent runs can never write into the same directory.
+ */
+export const ACTIVE_DIR_PREFIX = '_joplin_active_';
 export const LATEST_FILENAME = 'latest.txt';
 export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
 export const DEFAULT_EXPORT_RETRIES = 3;
@@ -31,6 +39,8 @@ export const EXPORT_FORMAT = 'raw';
 const PAGE_LIMIT = 100;
 const VERIFY_CONCURRENCY = 8;
 const SNAPSHOT_COLLISION_SUFFIX_START = 2;
+/** Floor for the lock heartbeat interval, regardless of the stale threshold. */
+const MIN_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
   /database is locked/i,
@@ -46,6 +56,31 @@ const TRANSIENT_EXPORT_ERROR_PATTERNS = [
 // ---------------------------------------------------------------------------
 
 export type BackupStatus = 'success' | 'skipped';
+
+/** Directory the RAW exporter writes attachments into. */
+export const RESOURCES_DIR_NAME = 'resources';
+
+/**
+ * What the database says the vault contains. Read in a single pass so the
+ * completeness check costs no extra queries.
+ */
+export interface VaultInventory {
+  /** Fingerprint used to detect "nothing changed since the last snapshot". */
+  fingerprint: ChangeFingerprint;
+  /** Ids of every note in the database. */
+  noteIds: string[];
+  /** Number of resources in the database. */
+  resourceCount: number;
+}
+
+export interface CompletenessCheckInput {
+  /** Relative paths of every file the export produced. */
+  exportedFiles: readonly string[];
+  /** Inventory read from the database. */
+  inventory: VaultInventory;
+  /** Folder ids that were handed to the exporter. */
+  folderIds: readonly string[];
+}
 
 export interface BackupResult {
   status: BackupStatus;
@@ -73,10 +108,16 @@ export interface BackupOptions {
   staleLockMs?: number;
   /** Retry attempts for transient export failures. */
   exportRetries?: number;
+  /** Minimum free bytes required at the backup root before running. */
+  minFreeBytes?: number;
   /** Injectable clock for deterministic snapshot names. */
   now?: Date;
-  /** Injectable SHA-256 implementation (defaults to the streaming one). */
-  computeHash?: (filePath: string) => Promise<string>;
+  /**
+   * Injectable SHA-256 implementation (defaults to the streaming one). The
+   * optional `sizeHint` lets the implementation pick a chunk size without an
+   * extra `stat` call.
+   */
+  computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
 }
 
 export interface VerifyResult {
@@ -96,19 +137,14 @@ interface ResolvedContext {
   activeDir: string;
   staleLockMs: number;
   exportRetries: number;
-  computeHash: (filePath: string) => Promise<string>;
+  /** Undefined means use `assertDiskSpace`'s default threshold. */
+  minFreeBytes?: number;
+  computeHash: (filePath: string, sizeHint?: number) => Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function errorCode(error: unknown): string | undefined {
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    return String((error as { code?: unknown }).code);
-  }
-  return undefined;
-}
 
 export function resolveBackupRoot(backupPath: string, profileName?: string): string {
   const base = backupPath.replace(/[/\\]+$/, '');
@@ -116,8 +152,33 @@ export function resolveBackupRoot(backupPath: string, profileName?: string): str
   return path.join(base, profileName.trim());
 }
 
-export function activeDirPath(backupRoot: string): string {
-  return path.join(backupRoot, ACTIVE_DIR_NAME);
+export function activeDirPath(backupRoot: string, runName?: string): string {
+  return path.join(backupRoot, runName ?? createStagingDirName());
+}
+
+/**
+ * Name of the staging directory used by one backup run. It embeds the start
+ * time, the process id and a random suffix so that two runs — even ones that
+ * overlap because a lock was wrongly stolen — never share a directory.
+ */
+export function createStagingDirName(now: Date = new Date()): string {
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `${ACTIVE_DIR_PREFIX}${generateSnapshotName(now)}_${process.pid}_${suffix}`;
+}
+
+/** Names of the staging directories currently present under `backupRoot`. */
+export async function listStagingDirs(backupRoot: string): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await fs.readdir(backupRoot, { withFileTypes: true });
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return [];
+    throw error;
+  }
+
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(ACTIVE_DIR_PREFIX))
+    .map((entry) => entry.name);
 }
 
 export function snapshotDirPath(backupRoot: string, snapshotName: string): string {
@@ -225,22 +286,40 @@ async function paginate(
 }
 
 export async function getChangeFingerprint(): Promise<ChangeFingerprint> {
+  return (await collectVaultInventory()).fingerprint;
+}
+
+/**
+ * Read the vault inventory in a single pass over notes and resources.
+ *
+ * The notes query already asks for `id`, so collecting the ids costs nothing
+ * extra and the completeness check can reuse them.
+ */
+export async function collectVaultInventory(): Promise<VaultInventory> {
   let maxNoteUpdatedTime = 0;
   let noteCount = 0;
   let maxResourceUpdatedTime = 0;
+  let resourceCount = 0;
+  const noteIds: string[] = [];
 
   await paginate('notes', ['id', 'updated_time'], (note) => {
     noteCount += 1;
+    if (typeof note.id === 'string') noteIds.push(note.id);
     const updated = Number(note.updated_time) || 0;
     if (updated > maxNoteUpdatedTime) maxNoteUpdatedTime = updated;
   });
 
   await paginate('resources', ['updated_time'], (resource) => {
+    resourceCount += 1;
     const updated = Number(resource.updated_time) || 0;
     if (updated > maxResourceUpdatedTime) maxResourceUpdatedTime = updated;
   });
 
-  return { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime };
+  return {
+    fingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+    noteIds,
+    resourceCount,
+  };
 }
 
 export async function getAllFolderIds(): Promise<string[]> {
@@ -249,6 +328,54 @@ export async function getAllFolderIds(): Promise<string[]> {
     if (typeof folder.id === 'string') ids.push(folder.id);
   });
   return ids;
+}
+
+/**
+ * Compare the exported tree with the database inventory.
+ *
+ * Joplin's RAW exporter silently skips items it cannot handle — still-encrypted
+ * notes, resources of trashed notes — and still reports success, so the only
+ * way to notice a partial export is to compare what is on disk with what the
+ * database says exists.
+ *
+ * The result is a list of warnings, never an error: encrypted or trashed items
+ * legitimately produce false positives, and refusing to back up at all would be
+ * worse than an incomplete snapshot.
+ *
+ * Tags and note-tags are not checked — verifying them needs extra scans that
+ * cost more than they are worth.
+ */
+export function checkExportCompleteness(input: CompletenessCheckInput): string[] {
+  const { exportedFiles, inventory, folderIds } = input;
+  const exported = new Set(exportedFiles);
+  const warnings: string[] = [];
+
+  const missingNotes = inventory.noteIds.filter((id) => !exported.has(`${id}.md`));
+  if (missingNotes.length > 0) {
+    warnings.push(
+      `${missingNotes.length} note(s) are missing from the export ` +
+        `(e.g. ${missingNotes.slice(0, 3).join(', ')}); they may still be encrypted.`,
+    );
+  }
+
+  const missingFolders = folderIds.filter((id) => !exported.has(`${id}.md`));
+  if (missingFolders.length > 0) {
+    warnings.push(
+      `${missingFolders.length} notebook(s) are missing from the export ` +
+        `(e.g. ${missingFolders.slice(0, 3).join(', ')}).`,
+    );
+  }
+
+  const resourcePrefix = `${RESOURCES_DIR_NAME}/`;
+  const exportedResources = exportedFiles.filter((file) => file.startsWith(resourcePrefix)).length;
+  if (exportedResources < inventory.resourceCount) {
+    warnings.push(
+      `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
+        'some attachments may be missing.',
+    );
+  }
+
+  return warnings;
 }
 
 export function isTransientExportError(error: unknown): boolean {
@@ -312,6 +439,26 @@ async function resolveJoplinVersion(): Promise<string> {
 // Context resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * Refresh the lock while a backup runs. A large vault can take longer than the
+ * stale threshold to export, and a lock that is still being renewed must never
+ * be mistaken for an abandoned one.
+ */
+function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () => void } {
+  const intervalMs = Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(staleLockMs / 3));
+  const timer = setInterval(() => {
+    void touchLock(lockPath).catch((error) => {
+      logger.warn('Failed to refresh the backup lock.', error);
+    });
+  }, intervalMs);
+
+  // The heartbeat must not keep the plugin's event loop alive on its own.
+  const unref = (timer as unknown as { unref?: () => void }).unref;
+  if (typeof unref === 'function') unref.call(timer);
+
+  return { stop: () => clearInterval(timer) };
+}
+
 async function resolveContext(options: BackupOptions): Promise<ResolvedContext> {
   const settings = await getSettings();
   const backupRoot =
@@ -324,6 +471,7 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
     activeDir: activeDirPath(backupRoot),
     staleLockMs: options.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
     exportRetries: options.exportRetries ?? DEFAULT_EXPORT_RETRIES,
+    minFreeBytes: options.minFreeBytes,
     computeHash: options.computeHash ?? computeFileSha256,
   };
 }
@@ -337,9 +485,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   const { settings, backupRoot, lockPath, activeDir } = context;
 
   await ensureBackupRoot(backupRoot);
-  await checkDiskSpace(backupRoot);
+  // Gate before locking: never commit to a run (or leave a lock behind) when
+  // there is provably not enough space.
+  await assertDiskSpace(backupRoot, context.minFreeBytes);
 
   await acquireLock(lockPath, context.staleLockMs);
+  const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
 
   try {
     const lastSnapshotName = await resolveLastSnapshot(
@@ -387,6 +538,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       lastSnapshotDir,
       lastManifest,
       activeFiles,
+      { computeHash: context.computeHash },
     );
 
     const joplinVersion = await resolveJoplinVersion();
@@ -431,6 +583,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
           : ''),
     };
   } finally {
+    heartbeat.stop();
     try {
       await releaseLock(lockPath);
     } catch (error) {
@@ -513,14 +666,35 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   };
 }
 
-/** Crash-recovery helper used by `onStart`: recreate the root and clear staging. */
+/**
+ * Crash-recovery helper used by `onStart`: recreate the root and clear staging
+ * directories left behind by a crashed run.
+ *
+ * A live backup holds the lock; when the lock is fresh nothing is removed, so
+ * a second Joplin instance pointed at the same backup root cannot destroy a
+ * run that is in progress.
+ */
 export async function recoverBackupDirs(options: BackupOptions = {}): Promise<void> {
   try {
     const settings = await getSettings();
     const backupRoot =
       options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
     await ensureBackupRoot(backupRoot);
-    await safeRmDir(activeDirPath(backupRoot));
+
+    const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
+    if (await hasFreshLock(path.join(backupRoot, LOCK_FILENAME), staleLockMs)) {
+      logger.info('Another backup appears to be running; leaving staging data in place.');
+      return;
+    }
+
+    for (const name of await listStagingDirs(backupRoot)) {
+      const dir = path.join(backupRoot, name);
+      // Skip directories that were touched recently: they may belong to a run
+      // that has only just started.
+      const stat = await fs.stat(dir).catch(() => null);
+      if (stat && Date.now() - stat.mtime.getTime() <= staleLockMs) continue;
+      await safeRmDir(dir);
+    }
   } catch (error) {
     logger.warn('Backup directory recovery skipped.', error);
   }

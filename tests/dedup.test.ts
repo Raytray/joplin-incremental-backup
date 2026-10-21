@@ -9,7 +9,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
-import { buildContentIndex, dedup, getDeduplicationMode } from '../src/dedup';
+import { buildContentIndex, dedup, getDeduplicationMode, replaceWithLink } from '../src/dedup';
 import type { FileEntry, Manifest } from '../src/manifest';
 
 const PREVIOUS = '/snapshots/20260101T000000';
@@ -166,6 +166,108 @@ describe('dedup', () => {
     const result = await dedup(ACTIVE, PREVIOUS, manifest, ['a.txt']);
 
     expect(result).toMatchObject({ hardlinked: 0, copied: 0, unchanged: 1 });
+  });
+});
+
+describe('replaceWithLink', () => {
+  it('swaps the destination without ever unlinking it first', async () => {
+    await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'shared' }]);
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'shared' }]);
+
+    const mode = await replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt'));
+
+    expect(mode).toBe('hardlink');
+    expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('shared');
+    // The staging file must not survive the swap.
+    expect(
+      await fs
+        .stat(path.join(ACTIVE, 'a.txt.dedup_tmp'))
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
+  });
+
+  it('leaves the destination intact when staging fails', async () => {
+    await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'shared' }]);
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'original' }]);
+
+    const linkSpy = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('boom'), { code: 'EIO' }));
+
+    await expect(
+      replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt')),
+    ).rejects.toMatchObject({ code: 'EIO' });
+
+    linkSpy.mockRestore();
+
+    // The exported file is still there, byte for byte.
+    expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('original');
+    expect(
+      await fs
+        .stat(path.join(ACTIVE, 'a.txt.dedup_tmp'))
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
+  });
+
+  it('copies when the filesystem refuses to hardlink', async () => {
+    await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'shared' }]);
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'shared' }]);
+
+    const linkSpy = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValueOnce(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+
+    const mode = await replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt'));
+
+    linkSpy.mockRestore();
+
+    expect(mode).toBe('copy');
+    expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('shared');
+  });
+});
+
+describe('dedup — failure handling', () => {
+  it('keeps the exported copy and reports a failure when the swap cannot happen', async () => {
+    await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'hello' }]);
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'hello' }]);
+    const manifest = makeManifest([{ path: 'a.txt', content: 'hello' }]);
+
+    const renameSpy = vi
+      .spyOn(fs, 'rename')
+      .mockRejectedValue(Object.assign(new Error('boom'), { code: 'EIO' }));
+
+    const result = await dedup(ACTIVE, PREVIOUS, manifest, ['a.txt']);
+
+    renameSpy.mockRestore();
+
+    expect(result).toMatchObject({ hardlinked: 0, copied: 0, unchanged: 0, failed: 1 });
+    // The content is still correct, so the manifest hash stays valid.
+    expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('hello');
+    expect(result.hashes.get('a.txt')).toBe(sha256('hello'));
+  });
+
+  it('uses the injected hasher', async () => {
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'hello' }]);
+    const computeHash = vi.fn(async () => 'injected-hash');
+
+    const result = await dedup(ACTIVE, null, null, ['a.txt'], { computeHash });
+
+    expect(computeHash).toHaveBeenCalledTimes(1);
+    expect(result.hashes.get('a.txt')).toBe('injected-hash');
+  });
+
+  it('keeps case-only-different paths on distinct hash keys', async () => {
+    await writeFiles(ACTIVE, [
+      { path: 'Note.md', content: 'upper' },
+      { path: 'note.md', content: 'lower' },
+    ]);
+
+    const result = await dedup(ACTIVE, null, null, ['Note.md', 'note.md']);
+
+    expect(result.hashes.get('Note.md')).toBe(sha256('upper'));
+    expect(result.hashes.get('note.md')).toBe(sha256('lower'));
   });
 });
 

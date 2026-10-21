@@ -114,6 +114,7 @@ toDedupeKey(relativePath: string): string
 safeRmDir(dirPath: string): Promise<void>
 ensureBackupRoot(backupRoot: string): Promise<void>
 checkDiskSpace(backupRoot: string, minFreeBytes?: number): Promise<number>
+assertDiskSpace(backupRoot: string, minFreeBytes?: number): Promise<number>
 mapWithConcurrency<T, R>(items, concurrency, mapper): Promise<R[]>
 computeFileSha256(filePath: string): Promise<string>
 ```
@@ -126,7 +127,8 @@ computeFileSha256(filePath: string): Promise<string>
 - `toDedupeKey`: `relativePath.toLowerCase().replace(/\\/g, '/')`. Note: lowercasing collapses case-only differences, which on case-sensitive filesystems (Linux) can merge two distinct paths into one key. This is content-safe (hardlinking still requires a matching SHA-256), but it can reduce dedup accuracy — keep the hash-match requirement as the source of truth.
 - `safeRmDir`: catch `EBUSY` on Windows, warn instead of throwing.
 - `computeFileSha256`: stream file in 64KB chunks (not whole-file read).
-- `checkDiskSpace`: default `minFreeBytes` to 1 GiB when omitted; **warn only** (do not throw) if free space is below the threshold, so a low-disk condition never blocks a backup. Return the free bytes observed.
+- `checkDiskSpace`: default `minFreeBytes` to 1 GiB when omitted; report only (warn, do not throw) when free space is below the threshold. Return the free bytes observed, or `-1` when it cannot be measured. Backups must **not** be blocked by an inability to measure free space.
+- `assertDiskSpace`: throw a descriptive error when the measured free space is below `minFreeBytes`. `-1` (unmeasurable) is treated as "unknown, proceed". `runBackup` calls this **before** acquiring the lock so a low-disk condition aborts the run cleanly (no partial snapshot, no leftover lock).
 - `mapWithConcurrency`: bounded worker pool, results in original order.
 
 **Tests (`tests/platform.test.ts`) using `memfs`:**
@@ -259,7 +261,7 @@ Orchestrate one full backup run.
 getSettings
 resolveBackupRoot (optional profileName subfolder)
 ensureBackupRoot
-checkDiskSpace
+assertDiskSpace → abort before locking if below the threshold
 generateSnapshotName (unique; see collision guard above)
 acquireLock(lockPath, staleLimitMs)
   resolveLastSnapshot + readManifest
@@ -297,7 +299,7 @@ finally:
 - Staging dir `_joplin_active_` cleaned on failure.
 - Atomic writes for manifest and `latest.txt`.
 - Retry transient export errors (`isTransientExportError`, `retryTransient`).
-- Disk space pre-flight (`checkDiskSpace`).
+- Disk space pre-flight (`assertDiskSpace`) that aborts the run before locking when the backup drive is below the free-space threshold.
 - Crash recovery in `onStart`: `ensureBackupRoot`, `safeRmDir(activeDir)`.
 
 **Tests (`tests/backup.test.ts`):**

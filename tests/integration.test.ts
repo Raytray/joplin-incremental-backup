@@ -15,8 +15,9 @@ import '../src/index';
 
 const pluginScript = mockState.pluginScript;
 import {
-  ACTIVE_DIR_NAME,
+  createStagingDirName,
   LATEST_FILENAME,
+  listStagingDirs,
   LOCK_FILENAME,
   runBackup,
   verifyBackup,
@@ -298,9 +299,7 @@ describe('lock contention', () => {
     await expect(run()).rejects.toMatchObject({ code: 'EEXIST' });
 
     expect(await listSnapshotDirs()).toEqual([]);
-    await expect(fs.stat(path.join(BACKUP_ROOT, ACTIVE_DIR_NAME))).rejects.toMatchObject({
-      code: 'ENOENT',
-    });
+    expect(await listStagingDirs(BACKUP_ROOT)).toEqual([]);
   });
 });
 
@@ -359,10 +358,13 @@ describe('plugin startup (onStart)', () => {
     expect(mockState.messageBoxes[0]).toMatch(/currently encrypted/);
   });
 
-  it('recovers by clearing the staging dir on startup', async () => {
-    const activeDir = path.join(BACKUP_ROOT, ACTIVE_DIR_NAME);
+  it('recovers by clearing stale staging dirs on startup', async () => {
+    const activeDir = path.join(BACKUP_ROOT, createStagingDirName());
     await fs.mkdir(activeDir, { recursive: true });
     await fs.writeFile(path.join(activeDir, 'leftover.md'), 'stale');
+    // Age the directory so it is unambiguously stale.
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    await fs.utimes(activeDir, old, old);
 
     await pluginScript!.onStart!();
 
