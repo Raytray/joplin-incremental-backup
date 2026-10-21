@@ -389,12 +389,25 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const snapshotName = options.snapshotName ?? generateSnapshotName(now);
     const snapshotDir = nodePath.join(backupRoot, snapshotName);
 
-    // Query Joplin version
+    // Query Joplin version (prefer versionInfo on Joplin 3.x; fall back to
+    // appVersion for older releases where versionInfo is unavailable).
     let joplinVersion = '';
     try {
-      joplinVersion = await joplin.appVersion();
+      if (typeof joplin.versionInfo === 'function') {
+        const info = await joplin.versionInfo();
+        joplinVersion = (info && typeof info.version === 'string') ? info.version : '';
+      } else if (typeof joplin.appVersion === 'function') {
+        joplinVersion = await joplin.appVersion();
+      }
     } catch {
-      joplinVersion = '';
+      // Fall back to appVersion if versionInfo failed (e.g. older shim).
+      try {
+        if (typeof joplin.appVersion === 'function') {
+          joplinVersion = await joplin.appVersion();
+        }
+      } catch {
+        joplinVersion = '';
+      }
     }
 
     // Build and atomically write manifest in activeDir

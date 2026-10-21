@@ -22,6 +22,7 @@ Each backup is a complete, importable Raw export directory, but unchanged files 
 - The plugin keeps a low `app_min_version` (`2.14`) in `manifest.json` so it remains installable on older Joplin releases, but only 2.14+ is supported.
 - Desktop only (`platforms: ["desktop"]`); mobile is not supported.
 - Joplin 3.x ships with an updated plugin version check (regex-based rather than semver). The `2.14` floor parses correctly under both schemes.
+- The plugin reads the Joplin version via `joplin.versionInfo()` on 3.x, falling back to the legacy `joplin.appVersion()` on older releases.
 
 ## Requirements
 

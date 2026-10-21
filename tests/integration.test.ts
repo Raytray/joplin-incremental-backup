@@ -79,6 +79,12 @@ describe('Integration', () => {
     resetFs();
     setupMockSettings();
     (joplin.appVersion as jest.Mock).mockResolvedValue('2.14.0');
+    (joplin.versionInfo as jest.Mock).mockResolvedValue({
+      version: '2.14.0',
+      platform: 'desktop',
+      profileVersion: 0,
+      syncVersion: 0,
+    });
     (joplin.data.get as jest.Mock).mockImplementation(async (path: string[]) => {
       if (path[0] === 'folders') return { items: [{ id: 'folder-1' }], has_more: false };
       if (path[0] === 'notes') return { items: [{ updated_time: 1700000000000 }], has_more: false };

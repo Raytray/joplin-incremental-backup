@@ -37,9 +37,14 @@ async function handleVerifyIncrementalBackup(): Promise<void> {
 
 joplin.plugins.register({
   onStart: async function () {
+    try {
     logger.info('Plugin started.');
 
-    await registerSettings();
+    try {
+      await registerSettings();
+    } catch (err) {
+      logger.error('registerSettings failed:', err);
+    }
 
     // Crash recovery: clean up any leftover staging directory from a previous
     // interrupted run, and ensure the backup root is usable.
@@ -47,34 +52,71 @@ joplin.plugins.register({
       const settings = await getSettings();
       await ensureBackupRoot(settings.backupPath);
       await safeRmDir(nodePath.join(settings.backupPath, ACTIVE_DIR_NAME));
-    } catch {
+    } catch (err) {
       // Settings may be unconfigured or inaccessible; ignore.
+      logger.warn('Crash recovery skipped:', err);
     }
 
-    await joplin.commands.register({
-      name: 'CreateIncrementalBackup',
-      label: 'Create Incremental Backup',
-      execute: handleCreateIncrementalBackup,
-    });
+    try {
+      await joplin.commands.register({
+        name: 'CreateIncrementalBackup',
+        label: 'Create Incremental Backup',
+        execute: handleCreateIncrementalBackup,
+      });
+    } catch (err) {
+      logger.error('command register (Create) failed:', err);
+    }
 
-    await joplin.commands.register({
-      name: 'VerifyIncrementalBackup',
-      label: 'Verify Incremental Backup',
-      execute: handleVerifyIncrementalBackup,
-    });
+    try {
+      await joplin.commands.register({
+        name: 'VerifyIncrementalBackup',
+        label: 'Verify Incremental Backup',
+        execute: handleVerifyIncrementalBackup,
+      });
+    } catch (err) {
+      logger.error('command register (Verify) failed:', err);
+    }
 
-    await joplin.views.menuItems.create(
-      'createIncrementalBackupMenuItem',
-      'CreateIncrementalBackup',
-      'tools',
-    );
+    try {
+      await joplin.views.menuItems.create(
+        'createIncrementalBackupMenuItem',
+        'CreateIncrementalBackup',
+        'tools',
+      );
+    } catch (err) {
+      logger.error('menuItems.create (Create) failed:', err);
+    }
 
-    await joplin.views.menuItems.create(
-      'verifyIncrementalBackupMenuItem',
-      'VerifyIncrementalBackup',
-      'tools',
-    );
+    try {
+      await joplin.views.menuItems.create(
+        'verifyIncrementalBackupMenuItem',
+        'VerifyIncrementalBackup',
+        'tools',
+      );
+    } catch (err) {
+      logger.error('menuItems.create (Verify) failed:', err);
+    }
 
-    await initScheduler();
+    try {
+      await initScheduler();
+    } catch (err) {
+      logger.error('initScheduler failed:', err);
+    }
+
+    try {
+      await joplin.views.dialogs.showMessageBox('Incremental Backup plugin started successfully.');
+    } catch (err) {
+      logger.error('showMessageBox (startup) failed:', err);
+    }
+    } catch (err) {
+      logger.error('Plugin failed to start:', err);
+      try {
+        await joplin.views.dialogs.showMessageBox(
+          'Incremental Backup failed to start: ' + (err instanceof Error ? err.message : String(err)),
+        );
+      } catch (e) {
+        logger.error('showMessageBox (failure) failed:', e);
+      }
+    }
   },
 });

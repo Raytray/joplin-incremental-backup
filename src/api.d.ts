@@ -99,7 +99,13 @@ declare module 'api' {
     commands: JoplinCommands;
     views: JoplinViews;
     data: JoplinData;
-    appVersion(): Promise<string>;
+    appVersion?(): Promise<string>;
+    versionInfo(): Promise<{
+      version: string;
+      platform: string;
+      profileVersion: number;
+      syncVersion: number;
+    }>;
   }
 
   const joplin: Joplin;

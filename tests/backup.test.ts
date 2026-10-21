@@ -384,7 +384,8 @@ describe('Backup Engine', () => {
       expect(vol.existsSync(`${BACKUP_ROOT}/${LOCK_FILENAME}`)).toBe(false);
     });
 
-    it('handles joplin.appVersion failure and custom snapshotName', async () => {
+    it('handles joplin version API failure and custom snapshotName', async () => {
+      (joplin.versionInfo as jest.Mock).mockRejectedValue(new Error('versionInfo unsupported'));
       (joplin.appVersion as jest.Mock).mockRejectedValue(new Error('appVersion unsupported'));
 
       (joplin.commands.execute as jest.Mock).mockImplementation(

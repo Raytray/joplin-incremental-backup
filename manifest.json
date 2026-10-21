@@ -6,6 +6,6 @@
   "description": "Deduplicated incremental snapshots of your Joplin data using the native Raw export format.",
   "author": "raytray",
   "homepage_url": "",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "platforms": ["desktop"]
 }

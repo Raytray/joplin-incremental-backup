@@ -34,6 +34,12 @@ const joplin = {
     get: jest.fn().mockResolvedValue({ items: [], has_more: false }),
   },
   appVersion: jest.fn().mockResolvedValue('2.14.0'),
+  versionInfo: jest.fn().mockResolvedValue({
+    version: '2.14.0',
+    platform: 'desktop',
+    profileVersion: 0,
+    syncVersion: 0,
+  }),
 };
 
 export default joplin;
