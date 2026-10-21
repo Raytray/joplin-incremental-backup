@@ -36,6 +36,7 @@ import {
   toDedupeKey,
   safeRmDir,
   ensureBackupRoot,
+  checkDiskSpace,
 } from '../src/platform';
 
 // ---------------------------------------------------------------------------
@@ -376,5 +377,20 @@ describe('ensureBackupRoot', () => {
     }) as unknown as typeof memFsPromises.access;
     await expect(ensureBackupRoot('/readonly')).rejects.toThrow(/not writable/);
     memFsPromises.access = origAccess;
+  });
+});
+
+describe('checkDiskSpace', () => {
+  it('returns available bytes when sufficient', async () => {
+    vol.reset();
+    vol.mkdirSync('/tmp', { recursive: true });
+    const avail = await checkDiskSpace('/tmp', 1);
+    expect(avail).toBeGreaterThan(0);
+  });
+
+  it('throws when insufficient space requested', async () => {
+    vol.reset();
+    vol.mkdirSync('/tmp', { recursive: true });
+    await expect(checkDiskSpace('/tmp', Number.MAX_SAFE_INTEGER)).rejects.toThrow(/Insufficient disk space/);
   });
 });

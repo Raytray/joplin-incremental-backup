@@ -200,6 +200,36 @@ export async function safeRmDir(dirPath: string): Promise<void> {
 // ensureBackupRoot
 // ---------------------------------------------------------------------------
 
+export async function checkDiskSpace(
+  backupRoot: string,
+  minFreeBytes: number = 10 * 1024 * 1024,
+): Promise<number> {
+  if (typeof fs.statfs !== 'function') {
+    return 0;
+  }
+  try {
+    const stat = await fs.statfs(backupRoot);
+    const available = Number(stat.bavail) * Number(stat.bsize);
+    if (minFreeBytes > 0 && available < minFreeBytes) {
+      throw new Error(
+        `Insufficient disk space for backup: ${available} bytes available, ` +
+          `${minFreeBytes} bytes required.`,
+      );
+    }
+    return available;
+  } catch (err: unknown) {
+    const nodeErr = err as NodeJS.ErrnoException;
+    // If statfs is unsupported on this platform/fs, don't block the backup.
+    if (nodeErr && (nodeErr.code === 'ENOSYS' || nodeErr.code === 'ENOTSUP')) {
+      return 0;
+    }
+    if (err instanceof Error && err.message.includes('Insufficient disk space')) {
+      throw err;
+    }
+    return 0;
+  }
+}
+
 export async function ensureBackupRoot(backupRoot: string): Promise<void> {
   if (!backupRoot || !backupRoot.trim()) {
     throw new Error('Backup path is empty. Please configure a valid backup directory in settings.');

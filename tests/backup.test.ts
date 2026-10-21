@@ -34,6 +34,8 @@ import {
   getAllFolderIds,
   resolveLastSnapshot,
   verifyBackup,
+  retryTransient,
+  isTransientExportError,
   LOCK_FILENAME,
   ACTIVE_DIR_NAME,
   LATEST_FILENAME,
@@ -691,5 +693,59 @@ describe('Backup Engine - verifyBackup', () => {
     const result = await verifyBackup();
     expect(result.ok).toBe(false);
     expect(result.mismatches).toContain('note.md');
+  });
+});
+
+describe('Backup reliability helpers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    resetFs();
+    setupMockSettings();
+    (joplin.appVersion as jest.Mock).mockResolvedValue('2.14.0');
+    (joplin.data.get as jest.Mock).mockImplementation(async (path: string[]) => {
+      if (path[0] === 'folders') return { items: [{ id: 'folder-1' }], has_more: false };
+      if (path[0] === 'notes') return { items: [{ updated_time: 1700000000000 }], has_more: false };
+      return { items: [], has_more: false };
+    });
+  });
+
+  it('identifies transient errors', () => {
+    expect(isTransientExportError({ code: 'EBUSY' })).toBe(true);
+    expect(isTransientExportError(new Error('timeout occurred'))).toBe(true);
+    expect(isTransientExportError(new Error('nope'))).toBe(false);
+  });
+
+  it('retries transient failures and succeeds', async () => {
+    let calls = 0;
+    const result = await retryTransient(async () => {
+      calls++;
+      if (calls === 1) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      return 'ok';
+    }, 3);
+    expect(result).toBe('ok');
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry non-transient failures', async () => {
+    let calls = 0;
+    await expect(
+      retryTransient(async () => {
+        calls++;
+        throw new Error('fatal');
+      }, 3)
+    ).rejects.toThrow('fatal');
+    expect(calls).toBe(1);
+  });
+
+  it('verifies a specific snapshot via snapshotToVerify', async () => {
+    (joplin.commands.execute as jest.Mock).mockImplementation(
+      async (_cmd: string, _ids: string[], _fmt: string, targetDir: string) => {
+        vol.mkdirSync(targetDir, { recursive: true });
+        vol.writeFileSync(`${targetDir}/note.md`, 'hello');
+      }
+    );
+    await runBackup({ now: new Date(Date.UTC(2026, 9, 20, 12, 0, 0)) });
+    const result = await verifyBackup({ snapshotToVerify: '20261020T120000' });
+    expect(result.ok).toBe(true);
   });
 });

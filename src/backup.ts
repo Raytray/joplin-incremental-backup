@@ -33,6 +33,7 @@ import {
   atomicWriteFile,
   safeRmDir,
   ensureBackupRoot,
+  checkDiskSpace,
 } from './platform';
 import {
   buildManifest,
@@ -64,6 +65,9 @@ export interface BackupOptions {
   snapshotName?: string;
   platform?: NodeJS.Platform;
   profileName?: string;
+  minFreeBytes?: number;
+  exportRetries?: number;
+  snapshotToVerify?: string;
 }
 
 export interface BackupResult {
@@ -261,6 +265,43 @@ export function resolveBackupRoot(basePath: string, profileName?: string): strin
   return nodePath.join(basePath, sanitizeProfileName(profile));
 }
 
+const TRANSIENT_EXPORT_CODES = new Set([
+  'EAGAIN',
+  'EBUSY',
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ENFILE',
+  'EMFILE',
+  'EINTR',
+]);
+
+export function isTransientExportError(err: unknown): boolean {
+  const nodeErr = err as { code?: string; message?: string } | null;
+  if (!nodeErr) return false;
+  if (nodeErr.code && TRANSIENT_EXPORT_CODES.has(nodeErr.code)) return true;
+  const message = typeof nodeErr.message === 'string' ? nodeErr.message : '';
+  return /timeout|temporarily unavailable|resource busy|try again/i.test(message);
+}
+
+export async function retryTransient<T>(
+  operation: () => Promise<T>,
+  maxAttempts: number = 3,
+): Promise<T> {
+  let lastError: unknown;
+  const attempts = Math.max(1, Math.floor(maxAttempts));
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err;
+      if (attempt === attempts || !isTransientExportError(err)) {
+        throw err;
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
   // Validate and read configuration
   const settings: BackupSettings = await getSettings(options.platform);
@@ -268,6 +309,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
   // Ensure the backup root exists and is writable (auto-create if absent).
   await ensureBackupRoot(backupRoot);
+
+  // Pre-flight: verify sufficient free disk space.
+  await checkDiskSpace(backupRoot, options.minFreeBytes);
 
   // Determine lock file path
   const lockPath = options.lockPath ?? nodePath.join(backupRoot, LOCK_FILENAME);
@@ -323,8 +367,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Retrieve all folder IDs from Joplin
     const notebookIds = await getAllFolderIds();
 
-    // Trigger Joplin's native raw export to activeDir
-    await joplin.commands.execute('exportFolders', notebookIds, 'raw', activeDir);
+    // Trigger Joplin's native raw export to activeDir (retry transient failures)
+    await retryTransient(
+      () => joplin.commands.execute('exportFolders', notebookIds, 'raw', activeDir),
+      options.exportRetries ?? 3,
+    );
 
     // Verify export: count files in activeDir; throw if zero
     const fileCount = await countFilesInDir(activeDir);
@@ -421,7 +468,22 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   const settings = await getSettings(options.platform);
   const backupRoot = resolveBackupRoot(settings.backupPath, options.profileName);
 
-  const snapshotInfo = await resolveLastSnapshot(backupRoot, settings.lastSnapshot);
+  const requestedSnapshot = options.snapshotToVerify ?? options.snapshotName;
+  let snapshotInfo: { name: string; dir: string } | null = null;
+  if (requestedSnapshot) {
+    const candidateDir = nodePath.join(backupRoot, requestedSnapshot);
+    try {
+      const stat = await fs.stat(candidateDir);
+      if (stat.isDirectory() && SNAPSHOT_PATTERN.test(requestedSnapshot)) {
+        snapshotInfo = { name: requestedSnapshot, dir: candidateDir };
+      }
+    } catch {
+      // fall through to resolveLastSnapshot
+    }
+  }
+  if (!snapshotInfo) {
+    snapshotInfo = await resolveLastSnapshot(backupRoot, settings.lastSnapshot);
+  }
   if (!snapshotInfo) {
     throw new Error('No snapshot found to verify.');
   }

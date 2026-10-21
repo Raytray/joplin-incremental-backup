@@ -1,7 +1,10 @@
 import joplin from 'api';
-import { registerSettings } from './settings';
+import { registerSettings, getSettings } from './settings';
 import { initScheduler } from './scheduler';
 import { runBackup, verifyBackup } from './backup';
+import { ensureBackupRoot, safeRmDir } from './platform';
+import * as nodePath from 'path';
+import { ACTIVE_DIR_NAME } from './backup';
 import { logger } from './logger';
 
 async function handleCreateIncrementalBackup(): Promise<void> {
@@ -37,6 +40,16 @@ joplin.plugins.register({
     logger.info('Plugin started.');
 
     await registerSettings();
+
+    // Crash recovery: clean up any leftover staging directory from a previous
+    // interrupted run, and ensure the backup root is usable.
+    try {
+      const settings = await getSettings();
+      await ensureBackupRoot(settings.backupPath);
+      await safeRmDir(nodePath.join(settings.backupPath, ACTIVE_DIR_NAME));
+    } catch {
+      // Settings may be unconfigured or inaccessible; ignore.
+    }
 
     await joplin.commands.register({
       name: 'CreateIncrementalBackup',
