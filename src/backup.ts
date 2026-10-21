@@ -500,7 +500,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const lastSnapshotDir = lastSnapshotName ? snapshotDirPath(backupRoot, lastSnapshotName) : null;
     const lastManifest = lastSnapshotDir ? await readManifest(lastSnapshotDir) : null;
 
-    const currentFingerprint = await getChangeFingerprint();
+    const inventory = await collectVaultInventory();
+    const currentFingerprint = inventory.fingerprint;
 
     if (
       settings.onlyOnChange &&
@@ -512,14 +513,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       return { status: 'skipped', message: 'No changes detected; backup skipped.' };
     }
 
-    await safeRmDir(activeDir);
-    await fs.mkdir(activeDir, { recursive: true });
-
     const folderIds = await getAllFolderIds();
-    const exportResult = await retryTransient(
-      () => joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, activeDir),
-      context.exportRetries,
-    );
+    const exportResult = await retryTransient(async () => {
+      // Each attempt starts from an empty directory so a partial export from
+      // a failed attempt can never end up in the snapshot.
+      await safeRmDir(activeDir);
+      await fs.mkdir(activeDir, { recursive: true });
+      return joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, activeDir);
+    }, context.exportRetries);
     const exportWarnings = extractExportWarnings(exportResult);
     if (exportWarnings.length > 0) {
       logger.warn(
@@ -532,6 +533,20 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     if (activeFiles.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
     }
+
+    // Joplin's RAW exporter silently skips items it cannot handle (still-encrypted
+    // notes, resources of trashed notes, …) while still reporting success. Compare
+    // what is on disk with what the database says exists and surface the
+    // difference as warnings rather than aborting the run.
+    const completenessWarnings = checkExportCompleteness({
+      exportedFiles: activeFiles,
+      inventory,
+      folderIds,
+    });
+    if (completenessWarnings.length > 0) {
+      logger.warn('The export looks incomplete:', completenessWarnings);
+    }
+    const warnings = [...exportWarnings, ...completenessWarnings];
 
     const dedupResult: DedupResult = await dedup(
       activeDir,
@@ -575,11 +590,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       hardlinked: dedupResult.hardlinked,
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
-      warnings: exportWarnings,
+      warnings,
       message:
         `Backup complete: ${manifest.fileCount} files in ${snapshotName}.` +
-        (exportWarnings.length > 0
-          ? ` ${exportWarnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
+        (warnings.length > 0
+          ? ` ${warnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
           : ''),
     };
   } finally {

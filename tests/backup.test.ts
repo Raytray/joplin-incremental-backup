@@ -91,8 +91,8 @@ beforeEach(async () => {
   resetMockJoplin();
   await fs.mkdir(path.join(BACKUP_ROOT, PROFILE), { recursive: true });
   setSettings();
-  setData({ notes: [{ id: 'n1', updated_time: 1000 }] });
-  stubExport([{ path: 'note.md', content: 'hello' }]);
+  setData({ notes: [{ id: 'n1', updated_time: 1000 }], folders: [] });
+  stubExport([{ path: 'n1.md', content: 'hello' }]);
 });
 
 async function run(overrides: Record<string, unknown> = {}) {
@@ -330,7 +330,7 @@ describe('runBackup — happy path', () => {
     const snapshotDir = snapshotDirPath(path.join(BACKUP_ROOT, PROFILE), '20260102T030405');
     const manifest = await readManifest(snapshotDir);
     expect(manifest?.fileCount).toBe(1);
-    expect(manifest?.files).toEqual([{ path: 'note.md', size: 5, sha256: sha256('hello') }]);
+    expect(manifest?.files).toEqual([{ path: 'n1.md', size: 5, sha256: sha256('hello') }]);
 
     await expect(
       fs.readFile(path.join(BACKUP_ROOT, PROFILE, LATEST_FILENAME), 'utf8'),
@@ -373,7 +373,7 @@ describe('runBackup — onlyOnChange', () => {
     const first = await run();
     expect(first.status).toBe('success');
 
-    stubExport([{ path: 'note.md', content: 'hello' }]);
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
 
     expect(second.status).toBe('skipped');
@@ -412,7 +412,7 @@ describe('runBackup — onlyOnChange', () => {
     const { changeFingerprint: _dropped, ...legacy } = manifest!;
     await fs.writeFile(path.join(snapshotDir, MANIFEST_FILENAME), JSON.stringify(legacy));
 
-    stubExport([{ path: 'note.md', content: 'hello' }]);
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
   });
@@ -456,7 +456,7 @@ describe('runBackup — failures', () => {
       if (attempts === 1) throw new Error('database is locked');
       const dir = String(target);
       await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, 'note.md'), 'hello');
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
     };
 
     const result = await run({ exportRetries: 3 });
@@ -482,7 +482,7 @@ describe('export warnings', () => {
     mockState.commandHandlers.exportFolders = async (_ids, _format, target) => {
       const dir = String(target);
       await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, 'note.md'), 'hello');
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
       return { warnings: ['This item is currently encrypted: note "x" and was not exported.'] };
     };
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
@@ -516,7 +516,7 @@ describe('runBackup — collision', () => {
 
     // Force a content change so the second run is not skipped.
     setData({ notes: [{ id: 'n1', updated_time: 2000 }] });
-    stubExport([{ path: 'note.md', content: 'hello' }]);
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run();
 
     expect(second.snapshotName).toBe('20260102T030405-2');
@@ -556,26 +556,23 @@ describe('verifyBackup', () => {
   it('reports mismatches for a corrupted file', async () => {
     const first = await run();
     const root = path.join(BACKUP_ROOT, PROFILE);
-    await fs.writeFile(
-      path.join(snapshotDirPath(root, first.snapshotName!), 'note.md'),
-      'tampered',
-    );
+    await fs.writeFile(path.join(snapshotDirPath(root, first.snapshotName!), 'n1.md'), 'tampered');
 
     const result = await verifyBackup({ backupRoot: root });
 
     expect(result.ok).toBe(false);
-    expect(result.mismatches).toEqual(['note.md']);
+    expect(result.mismatches).toEqual(['n1.md']);
     expect(result.message).toMatch(/failed/);
   });
 
   it('reports a missing file as a mismatch', async () => {
     const first = await run();
     const root = path.join(BACKUP_ROOT, PROFILE);
-    await fs.rm(path.join(snapshotDirPath(root, first.snapshotName!), 'note.md'));
+    await fs.rm(path.join(snapshotDirPath(root, first.snapshotName!), 'n1.md'));
 
     const result = await verifyBackup({ backupRoot: root });
     expect(result.ok).toBe(false);
-    expect(result.mismatches).toEqual(['note.md']);
+    expect(result.mismatches).toEqual(['n1.md']);
   });
 
   it('reports when there is nothing to verify', async () => {
