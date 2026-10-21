@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   atomicWriteFile,
+  collectEntries,
   collectFilesRecursive,
   computeFileSha256,
   mapWithConcurrency,
@@ -128,27 +129,35 @@ export function collectFilesFromPaths(filePaths: readonly string[], baseDir: str
  * Build a complete manifest for `snapshotDir`. When `precomputedHashes` is
  * supplied (from `dedup()`), matching hashes are reused instead of re-reading
  * every file.
+ *
+ * `filePaths` can be either plain relative paths (legacy) or objects with
+ * `path` and `size`. Supplying sizes avoids a `stat` per file.
  */
 export async function buildManifest(
   snapshotDir: string,
   meta: ManifestMeta,
-  filePaths?: readonly string[],
+  filePaths?: readonly (string | { path: string; size: number })[],
   precomputedHashes?: ReadonlyMap<string, string>,
 ): Promise<Manifest> {
-  const relativePaths = filePaths
-    ? filePaths.map(normalizeRelativePath)
-    : await collectFilesRecursive(snapshotDir, snapshotDir);
-  const uniqueSortedPaths = [...new Set(relativePaths)].sort();
+  const entries = filePaths
+    ? filePaths.map((entry) =>
+        typeof entry === 'string'
+          ? { path: normalizeRelativePath(entry), size: undefined }
+          : { path: normalizeRelativePath(entry.path), size: entry.size },
+      )
+    : await collectEntries(snapshotDir, snapshotDir);
+  const uniqueSortedEntries = [...new Map(entries.map((e) => [e.path, e])).values()].sort((a, b) =>
+    a.path.localeCompare(b.path),
+  );
 
   const files = await mapWithConcurrency(
-    uniqueSortedPaths,
+    uniqueSortedEntries,
     MANIFEST_HASH_CONCURRENCY,
-    async (relativePath): Promise<FileEntry> => {
+    async ({ path: relativePath, size }): Promise<FileEntry> => {
       const absolutePath = path.join(snapshotDir, relativePath);
-      const stats = await fs.stat(absolutePath);
       const precomputed = precomputedHashes?.get(toManifestKey(relativePath));
-      const sha256 = precomputed ?? (await computeFileSha256(absolutePath));
-      return { path: relativePath, size: stats.size, sha256 };
+      const sha256 = precomputed ?? (await computeFileSha256(absolutePath, size));
+      return { path: relativePath, size: size ?? (await fs.stat(absolutePath)).size, sha256 };
     },
   );
 

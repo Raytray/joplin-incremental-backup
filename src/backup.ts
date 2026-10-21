@@ -7,6 +7,7 @@ import {
   acquireLock,
   assertDiskSpace,
   atomicWriteFile,
+  collectEntries,
   collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
@@ -15,6 +16,7 @@ import {
   mapWithConcurrency,
   releaseLock,
   safeRmDir,
+  toManifestKey,
   touchLock,
 } from './platform';
 import { buildManifest, readManifest, writeManifest } from './manifest';
@@ -36,7 +38,7 @@ export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
 export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
 
-const PAGE_LIMIT = 100;
+const PAGE_LIMIT = 1000;
 const VERIFY_CONCURRENCY = 8;
 const SNAPSHOT_COLLISION_SUFFIX_START = 2;
 /** Floor for the lock heartbeat interval, regardless of the stale threshold. */
@@ -277,6 +279,12 @@ async function paginate(
     const items: Array<Record<string, unknown>> = Array.isArray(response?.items)
       ? response.items
       : [];
+
+    if (page === 1) {
+      logger.debug(
+        `joplin.data.get("${resource}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
+      );
+    }
 
     for (const item of items) onItem(item);
 
@@ -529,10 +537,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       );
     }
 
-    const activeFiles = await collectActiveFiles(activeDir);
-    if (activeFiles.length === 0) {
+    const activeEntries = await collectEntries(activeDir, activeDir);
+    if (activeEntries.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
     }
+    const activeFiles = activeEntries.map((e) => e.path);
+    const fileSizes = new Map<string, number>(
+      activeEntries.map((e) => [toManifestKey(e.path), e.size]),
+    );
 
     // Joplin's RAW exporter silently skips items it cannot handle (still-encrypted
     // notes, resources of trashed notes, …) while still reporting success. Compare
@@ -553,7 +565,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       lastSnapshotDir,
       lastManifest,
       activeFiles,
-      { computeHash: context.computeHash },
+      { computeHash: context.computeHash, fileSizes },
     );
 
     const joplinVersion = await resolveJoplinVersion();
@@ -568,7 +580,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       createdAt: Date.now(),
       deduplication: getDeduplicationMode(dedupResult),
     };
-    const manifest = await buildManifest(activeDir, meta, activeFiles, dedupResult.hashes);
+    const manifest = await buildManifest(activeDir, meta, activeEntries, dedupResult.hashes);
     await writeManifest(activeDir, manifest);
 
     await safeRmDir(snapshotDir);
@@ -653,7 +665,13 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   const results = await mapWithConcurrency(manifest.files, VERIFY_CONCURRENCY, async (file) => {
     const filePath = path.join(snapshotDir, file.path);
     try {
-      const actual = await computeHash(filePath);
+      const stat = await fs.stat(filePath);
+      // Size mismatch is conclusive — no need to hash.
+      if (stat.size !== file.size) {
+        return { path: file.path, ok: false };
+      }
+      // Size matches; pass the known size as the hint so the hasher can skip its stat.
+      const actual = await computeHash(filePath, file.size);
       return actual === file.sha256
         ? { path: file.path, ok: true }
         : { path: file.path, ok: false };

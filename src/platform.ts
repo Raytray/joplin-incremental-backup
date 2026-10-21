@@ -3,7 +3,9 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { logger } from './logger';
 
-const HASH_CHUNK_SIZE = 64 * 1024;
+const HASH_CHUNK_SIZE_SMALL = 64 * 1024; // ≤ 64 KB files
+const HASH_CHUNK_SIZE_LARGE = 1024 * 1024; // > 64 KB files
+const HASH_CHUNK_THRESHOLD = 64 * 1024;
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
 const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']);
@@ -269,12 +271,18 @@ export async function mapWithConcurrency<T, R>(
   return results;
 }
 
-/** SHA-256 of a file, read in 64KB chunks so large files are not buffered. */
-export async function computeFileSha256(filePath: string): Promise<string> {
+/** SHA-256 of a file, read in chunks sized by the file size (64 KB for small, 1 MB for large). */
+export async function computeFileSha256(filePath: string, sizeHint?: number): Promise<string> {
   const hash = createHash('sha256');
   const handle = await fs.open(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(HASH_CHUNK_SIZE);
+    let size = sizeHint;
+    if (size === undefined) {
+      const stat = await handle.stat();
+      size = stat.size;
+    }
+    const chunkSize = size > HASH_CHUNK_THRESHOLD ? HASH_CHUNK_SIZE_LARGE : HASH_CHUNK_SIZE_SMALL;
+    const buffer = Buffer.alloc(chunkSize);
     let position = 0;
     while (true) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
@@ -288,9 +296,12 @@ export async function computeFileSha256(filePath: string): Promise<string> {
   return hash.digest('hex');
 }
 
-/** Recursively collect file paths relative to `baseDir`, using `/` separators. */
-export async function collectFilesRecursive(dir: string, baseDir: string = dir): Promise<string[]> {
-  const results: string[] = [];
+/** One stat per file, in parallel, returning path and size. */
+export async function collectEntries(
+  dir: string,
+  baseDir: string = dir,
+): Promise<Array<{ path: string; size: number }>> {
+  const results: Array<{ path: string; size: number }> = [];
 
   const walk = async (current: string): Promise<void> => {
     const entries = await fs.readdir(current, { withFileTypes: true });
@@ -299,11 +310,21 @@ export async function collectFilesRecursive(dir: string, baseDir: string = dir):
       if (entry.isDirectory()) {
         await walk(fullPath);
       } else if (entry.isFile()) {
-        results.push(path.relative(baseDir, fullPath).split(path.sep).join('/'));
+        const stat = await fs.stat(fullPath);
+        results.push({
+          path: path.relative(baseDir, fullPath).split(path.sep).join('/'),
+          size: stat.size,
+        });
       }
     }
   };
 
   await walk(dir);
   return results;
+}
+
+/** Recursively collect file paths relative to `baseDir`, using `/` separators. */
+export async function collectFilesRecursive(dir: string, baseDir: string = dir): Promise<string[]> {
+  const entries = await collectEntries(dir, baseDir);
+  return entries.map((e) => e.path);
 }
