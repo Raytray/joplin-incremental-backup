@@ -38,7 +38,7 @@ export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
 export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
 
-const PAGE_LIMIT = 1000;
+const PAGE_LIMIT = 100;
 const VERIFY_CONCURRENCY = 8;
 const SNAPSHOT_COLLISION_SUFFIX_START = 2;
 /** Floor for the lock heartbeat interval, regardless of the stale threshold. */
