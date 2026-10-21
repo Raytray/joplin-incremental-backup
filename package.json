@@ -7,9 +7,8 @@
   "private": true,
   "scripts": {
     "build": "webpack --config webpack.config.js",
-    "postbuild": "node -e \"const fs=require('fs');fs.mkdirSync('publish',{recursive:true});fs.copyFileSync('manifest.json','publish/manifest.json');\"",
-    "dev": "webpack --config webpack.config.js --mode development --watch",
-    "test": "jest",
+    "postbuild": "node scripts/package.js",
+    "dev": "webpack --config webpack.config.js --mode development --watch",    "test": "jest",
     "test:coverage": "jest --coverage",
     "lint": "oxlint src tests",
     "format": "prettier --write .",
