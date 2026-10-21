@@ -11,6 +11,14 @@ export interface MockJoplinState {
   onChangeHandlers: Array<(event: { keys: string[] }) => void>;
   executedCommands: Array<{ name: string; args: unknown[] }>;
   commandResults: Record<string, unknown>;
+  /** Optional side effects per command name (e.g. writing export files). */
+  commandHandlers: Record<string, (...args: unknown[]) => unknown>;
+  /** Canned items returned by `data.get`, keyed by resource name. */
+  dataItems: Record<string, Array<Record<string, unknown>>>;
+  /** When set, `data.get` rejects with this error (used for transient-failure tests). */
+  dataError: Error | null;
+  versionError: Error | null;
+  dataPageLimit: number;
 }
 
 function createState(): MockJoplinState {
@@ -22,19 +30,19 @@ function createState(): MockJoplinState {
     onChangeHandlers: [],
     executedCommands: [],
     commandResults: {},
+    commandHandlers: {},
+    dataItems: {},
+    dataError: null,
+    versionError: null,
+    dataPageLimit: 100,
   };
 }
 
 export const mockState: MockJoplinState = createState();
 
 export function resetMockJoplin(): void {
-  mockState.values = {};
-  mockState.registeredSection = null;
-  mockState.registeredSettings = null;
-  mockState.setValues = [];
-  mockState.onChangeHandlers = [];
-  mockState.executedCommands = [];
-  mockState.commandResults = {};
+  const fresh = createState();
+  Object.assign(mockState, fresh);
 }
 
 const joplin = {
@@ -65,6 +73,8 @@ const joplin = {
   commands: {
     async execute(name: string, ...args: unknown[]): Promise<unknown> {
       mockState.executedCommands.push({ name, args });
+      const handler = mockState.commandHandlers[name];
+      if (handler) return handler(...args);
       return mockState.commandResults[name];
     },
     async register(_command: unknown): Promise<void> {},
@@ -83,8 +93,16 @@ const joplin = {
     },
   },
   data: {
-    async get(_path: unknown, _query?: unknown): Promise<unknown> {
-      return { items: [], has_more: false };
+    async get(path: unknown, query?: unknown): Promise<unknown> {
+      if (mockState.dataError) throw mockState.dataError;
+
+      const resource = Array.isArray(path) ? String(path[0]) : String(path);
+      const all = mockState.dataItems[resource] ?? [];
+      const page = Number((query as { page?: unknown } | undefined)?.page ?? 1) || 1;
+      const limit = mockState.dataPageLimit;
+      const start = (page - 1) * limit;
+      const items = all.slice(start, start + limit);
+      return { items, has_more: start + items.length < all.length };
     },
   },
   plugins: {
@@ -96,6 +114,7 @@ const joplin = {
     syncVersion: number;
     platform: 'desktop';
   }> {
+    if (mockState.versionError) throw mockState.versionError;
     return {
       version: '3.7.0',
       profileVersion: 1,

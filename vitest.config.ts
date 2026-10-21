@@ -23,6 +23,7 @@ export default defineConfig({
         'src/manifest.ts',
         'src/dedup.ts',
         'src/retention.ts',
+        'src/backup.ts',
       ],
       exclude: ['src/__mocks__/**'],
       reporter: ['text', 'html'],
