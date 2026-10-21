@@ -1,0 +1,16 @@
+{
+	"manifest_version": 1,
+	"id": "io.github.raytray.joplin-incremental-backup",
+	"app_min_version": "3.7",
+	"version": "1.0.0",
+	"name": "Incremental Backup",
+	"description": "Deduplicated incremental snapshots of your Joplin data using the native Raw export format.",
+	"author": "raytray",
+	"homepage_url": "",
+	"repository_url": "",
+	"keywords": [],
+	"categories": [],
+	"screenshots": [],
+	"icons": {},
+	"promo_tile": {}
+}
