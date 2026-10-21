@@ -44,6 +44,13 @@ const SNAPSHOT_COLLISION_SUFFIX_START = 2;
 /** Floor for the lock heartbeat interval, regardless of the stale threshold. */
 const MIN_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
   /database is locked/i,
   /SQLITE_BUSY/i,
@@ -501,6 +508,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
 
   try {
+    const startTime = Date.now();
+    logger.info('Starting backup run...');
+
     const lastSnapshotName = await resolveLastSnapshot(
       backupRoot,
       settings.lastSnapshot || undefined,
@@ -508,6 +518,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const lastSnapshotDir = lastSnapshotName ? snapshotDirPath(backupRoot, lastSnapshotName) : null;
     const lastManifest = lastSnapshotDir ? await readManifest(lastSnapshotDir) : null;
 
+    logger.info('Scanning vault for changes...');
     const inventory = await collectVaultInventory();
     const currentFingerprint = inventory.fingerprint;
 
@@ -518,10 +529,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     ) {
       const nowIso = (options.now ?? new Date()).toISOString();
       await setLastBackup(nowIso);
+      logger.info('No changes detected; backup skipped.');
       return { status: 'skipped', message: 'No changes detected; backup skipped.' };
     }
 
     const folderIds = await getAllFolderIds();
+    logger.info(`Exporting ${folderIds.length} notebook(s)...`);
     const exportResult = await retryTransient(async () => {
       // Each attempt starts from an empty directory so a partial export from
       // a failed attempt can never end up in the snapshot.
@@ -537,6 +550,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       );
     }
 
+    logger.info('Collecting exported files...');
     const activeEntries = await collectEntries(activeDir, activeDir);
     if (activeEntries.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
@@ -544,6 +558,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const activeFiles = activeEntries.map((e) => e.path);
     const fileSizes = new Map<string, number>(
       activeEntries.map((e) => [toManifestKey(e.path), e.size]),
+    );
+    logger.info(
+      `Exported ${activeFiles.length} file(s) (${formatBytes(activeEntries.reduce((s, e) => s + e.size, 0))}).`,
     );
 
     // Joplin's RAW exporter silently skips items it cannot handle (still-encrypted
@@ -560,6 +577,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
     const warnings = [...exportWarnings, ...completenessWarnings];
 
+    logger.info('Deduplicating against previous snapshot...');
     const dedupResult: DedupResult = await dedup(
       activeDir,
       lastSnapshotDir,
@@ -600,6 +618,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
       );
     }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    logger.info(
+      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
+        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
+        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
+        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
+    );
 
     return {
       status: 'success',
