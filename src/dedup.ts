@@ -8,7 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
-import { hardlinkOrCopy, toDedupeKey } from './platform';
+import { hardlinkOrCopy, toDedupeKey, mapWithConcurrency } from './platform';
 import { readManifest, Manifest, FileEntry, DeduplicationMode } from './manifest';
 
 export interface DedupResult {
@@ -70,6 +70,33 @@ async function collectFiles(dir: string): Promise<string[]> {
  * @param previousManifest Optional pre-parsed manifest from the previous snapshot
  * @returns Counts of hardlinked, copied, and unchanged files
  */
+export interface ContentIndex {
+  pathIndex: Map<string, FileEntry>;
+  hashIndex: Map<string, FileEntry>;
+}
+
+/**
+ * Build a content-addressed index of a previous snapshot manifest exactly once.
+ * `pathIndex` maps a normalized relative path to its manifest entry.
+ * `hashIndex` maps a SHA-256 digest to a manifest entry (content-addressed).
+ */
+export function buildContentIndex(manifest: Manifest): ContentIndex {
+  const pathIndex = new Map<string, FileEntry>();
+  const hashIndex = new Map<string, FileEntry>();
+
+  for (const entry of manifest.files) {
+    const key = toDedupeKey(entry.path);
+    if (!pathIndex.has(key)) {
+      pathIndex.set(key, entry);
+    }
+    if (!hashIndex.has(entry.sha256)) {
+      hashIndex.set(entry.sha256, entry);
+    }
+  }
+
+  return { pathIndex, hashIndex };
+}
+
 export async function dedup(
   activeDir: string,
   lastSnapshotDir?: string | null,
@@ -115,23 +142,20 @@ export async function dedup(
     return result;
   }
 
-  // Index the previous manifest entries by normalized path and by sha256
-  const pathIndex = new Map<string, FileEntry>();
-  const hashIndex = new Map<string, FileEntry>();
+  // Build a content-addressed index of the previous snapshot exactly once per run.
+  const { pathIndex, hashIndex } = buildContentIndex(prevManifest);
 
-  for (const entry of prevManifest.files) {
-    const key = toDedupeKey(entry.path);
-    if (!pathIndex.has(key)) {
-      pathIndex.set(key, entry);
-    }
-    if (!hashIndex.has(entry.sha256)) {
-      hashIndex.set(entry.sha256, entry);
-    }
-  }
+  // Compute SHA-256 for all active files in parallel (bounded concurrency)
+  const activeHashes = await mapWithConcurrency(activeFiles, 4, (filePath) =>
+    computeSha256(filePath),
+  );
+  const hashMap = new Map<string, string>(
+    activeFiles.map((filePath, index) => [filePath, activeHashes[index]]),
+  );
 
   for (const activeFilePath of activeFiles) {
     const relPath = nodePath.relative(activeDir, activeFilePath).replace(/\\/g, '/');
-    const sha256 = await computeSha256(activeFilePath);
+    const sha256 = hashMap.get(activeFilePath)!;
     const key = toDedupeKey(relPath);
 
     let match: FileEntry | null = null;

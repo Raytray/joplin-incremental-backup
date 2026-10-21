@@ -8,7 +8,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as nodePath from 'path';
-import { atomicWriteFile } from './platform';
+import { atomicWriteFile, mapWithConcurrency } from './platform';
 
 export interface FileEntry {
   /** Relative path within snapshot (forward-slash normalized) */
@@ -114,12 +114,12 @@ export async function writeManifest(
  * Recursively walk `dir` and collect file entries with SHA-256 digests.
  * Ignores `manifest.json` and temporary `.tmp` files.
  */
-async function collectFiles(
+async function collectFilePaths(
   dir: string,
   baseDir: string = dir,
-): Promise<FileEntry[]> {
+): Promise<string[]> {
   const entries = await fs.readdir(dir);
-  const files: FileEntry[] = [];
+  const paths: string[] = [];
 
   for (const name of entries) {
     if (name === MANIFEST_FILENAME || name.endsWith('.tmp')) {
@@ -130,21 +130,36 @@ async function collectFiles(
     const stat = await fs.stat(fullPath);
 
     if (stat.isDirectory()) {
-      const nested = await collectFiles(fullPath, baseDir);
-      files.push(...nested);
+      const nested = await collectFilePaths(fullPath, baseDir);
+      paths.push(...nested);
     } else if (stat.isFile()) {
-      const relativePath = nodePath.relative(baseDir, fullPath).replace(/\\/g, '/');
-      const content = await fs.readFile(fullPath);
-      const sha256 = crypto.createHash('sha256').update(content).digest('hex');
-      files.push({
-        path: relativePath,
-        size: content.length,
-        sha256,
-      });
+      paths.push(fullPath);
     }
   }
 
-  return files;
+  return paths;
+}
+
+async function collectFiles(
+  dir: string,
+  baseDir: string = dir,
+): Promise<FileEntry[]> {
+  const filePaths = await collectFilePaths(dir, baseDir);
+
+  // Hash files in parallel with bounded concurrency
+  const entries = await mapWithConcurrency(filePaths, 4, async (fullPath) => {
+    const stat = await fs.stat(fullPath);
+    const content = await fs.readFile(fullPath);
+    const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+    const relativePath = nodePath.relative(baseDir, fullPath).replace(/\\/g, '/');
+    return {
+      path: relativePath,
+      size: stat.size,
+      sha256,
+    } as FileEntry;
+  });
+
+  return entries;
 }
 
 /**

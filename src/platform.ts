@@ -230,6 +230,33 @@ export async function checkDiskSpace(
   }
 }
 
+/**
+ * Run an async mapper over `items` with a bounded number of concurrent workers.
+ * Results are returned in the original input order.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  if (items.length === 0) return results;
+
+  const workerCount = Math.max(1, Math.min(concurrency || 1, items.length));
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) break;
+      results[index] = await mapper(items[index], index);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
 export async function ensureBackupRoot(backupRoot: string): Promise<void> {
   if (!backupRoot || !backupRoot.trim()) {
     throw new Error('Backup path is empty. Please configure a valid backup directory in settings.');
