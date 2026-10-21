@@ -29,6 +29,7 @@ import {
   ensureBackupRoot,
   checkDiskSpace,
   computeFileSha256,
+  mapWithConcurrency,
 } from './platform';
 import { buildManifest, writeManifest, readManifest, Manifest, collectFilesFromPaths } from './manifest';
 import {
@@ -500,27 +501,29 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
     throw new Error(`Manifest missing or malformed in snapshot ${snapshotName}.`);
   }
 
-  let matched = 0;
-  const mismatches: string[] = [];
-
-  for (const entry of manifest.files) {
+  const verificationResults = await mapWithConcurrency(manifest.files, 8, async (entry) => {
     const filePath = nodePath.join(snapshotDir, entry.path);
     try {
       const stat = await fs.stat(filePath);
       if (stat.size !== entry.size) {
-        mismatches.push(entry.path);
-        continue;
+        return false;
       }
       const hash = await computeFileSha256(filePath);
-      if (hash === entry.sha256) {
-        matched++;
-      } else {
-        mismatches.push(entry.path);
-      }
+      return hash === entry.sha256;
     } catch {
-      mismatches.push(entry.path);
+      return false;
     }
-  }
+  });
+
+  let matched = 0;
+  const mismatches: string[] = [];
+  verificationResults.forEach((isOk, index) => {
+    if (isOk) {
+      matched++;
+    } else {
+      mismatches.push(manifest.files[index].path);
+    }
+  });
 
   const total = manifest.files.length;
   const ok = mismatches.length === 0 && matched === total && total > 0;
