@@ -1,6 +1,14 @@
 import joplin from 'api';
-import { SettingItemType } from 'api/types';
 import { logger } from './logger';
+
+// Joplin injects the plugin API as the global `joplin` at runtime; the values
+// below mirror Joplin's SettingItemType enum so settings can be registered
+// without a runtime dependency on the type-only 'api/types' module.
+enum SettingItemType {
+  Int = 1,
+  String = 2,
+  Bool = 3,
+}
 
 export const SECTION_NAME = 'incrementalBackupSection';
 export const WINDOWS_MAX_PATH_LIMIT = 180;

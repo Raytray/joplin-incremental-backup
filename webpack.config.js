@@ -9,9 +9,6 @@ module.exports = {
   output: {
     path: path.resolve(__dirname, 'publish'),
     filename: 'index.js',
-    library: {
-      type: 'commonjs2',
-    },
   },
   resolve: {
     extensions: ['.ts', '.js'],
@@ -31,9 +28,10 @@ module.exports = {
       },
     ],
   },
-  // The 'api' module is provided by Joplin at runtime; do not bundle it.
+  // The 'api' module is provided by Joplin at runtime as the global `joplin`;
+  // do not bundle it. 'api/types' is type-only and must not be required at
+  // runtime, so it is not externalized here.
   externals: {
-    api: 'api',
-    'api/types': 'api/types',
+    api: 'var joplin',
   },
 };
