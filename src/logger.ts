@@ -8,7 +8,7 @@ export interface Logger {
 }
 
 function write(method: 'info' | 'warn' | 'error' | 'debug', args: unknown[]): void {
-  // eslint-disable-next-line no-console
+  // oxlint-disable-next-line no-console -- this module is the plugin's single logging sink
   console[method](PREFIX, ...args);
 }
 

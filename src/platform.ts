@@ -170,7 +170,7 @@ export async function mapWithConcurrency<T, R>(
   if (items.length === 0) return [];
 
   const limit = Math.max(1, Math.floor(concurrency) || 1);
-  // eslint-disable-next-line unicorn/no-new-array -- pre-sized result slots, filled by index
+  // oxlint-disable-next-line unicorn/no-new-array -- pre-sized result slots, filled by index
   const results = new Array<R>(items.length);
   let nextIndex = 0;
 
