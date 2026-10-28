@@ -1,3 +1,5 @@
+import type { Toast } from '../../api/types';
+
 /**
  * Runtime stand-in for the generated `api/index.ts` used by unit tests. The
  * real module only declares a global `joplin` provided by the host, so tests
@@ -22,6 +24,10 @@ export interface MockJoplinState {
   createdMenus: Array<{ id: string; label: string; items: unknown[]; location?: string }>;
   /** Messages shown via `views.dialogs.showMessageBox`. */
   messageBoxes: string[];
+  /** Toasts shown via `views.dialogs.showToast`. */
+  toasts: Toast[];
+  showToastCalls: Toast[];
+  toastMessages: string[];
   /** Canned items returned by `data.get`, keyed by resource name. */
   dataItems: Record<string, Array<Record<string, unknown>>>;
   /** When set, `data.get` rejects with this error (used for transient-failure tests). */
@@ -45,6 +51,9 @@ function createState(): MockJoplinState {
     registeredCommands: {},
     createdMenus: [],
     messageBoxes: [],
+    toasts: [],
+    showToastCalls: [],
+    toastMessages: [],
     dataItems: {},
     dataError: null,
     versionError: null,
@@ -111,6 +120,11 @@ const joplin = {
       async showMessageBox(message: string): Promise<number> {
         mockState.messageBoxes.push(message);
         return 0;
+      },
+      async showToast(toast: Toast): Promise<void> {
+        mockState.toasts.push(toast);
+        mockState.showToastCalls.push(toast);
+        mockState.toastMessages.push(toast.message);
       },
     },
   },

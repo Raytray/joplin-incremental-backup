@@ -42,6 +42,13 @@ describe('getSettings', () => {
       onlyOnChange: false,
       lastBackup: '2026-01-01T00:00:00.000Z',
       lastSnapshot: '20260101T000000',
+      lastBackupResult: '',
+      lastBackupResultJson: '',
+      lastRunResult: '',
+      lastBackupSummary: '',
+      lastBackupDetails: '',
+      lastBackupRun: '',
+      lastBackupRunResult: '',
     });
   });
 

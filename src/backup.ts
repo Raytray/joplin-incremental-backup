@@ -24,7 +24,15 @@ import type { ChangeFingerprint, DeduplicationMode, ManifestMeta } from './manif
 import { dedup, getDeduplicationMode } from './dedup';
 import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
-import { getSettings, setLastBackup, setLastSnapshot, SETTING_KEYS } from './settings';
+import {
+  getSettings,
+  setLastBackup,
+  setLastSnapshot,
+  setLastBackupResult,
+  setLastBackupResultJson,
+  SETTING_KEYS,
+} from './settings';
+import { ToastType } from 'api/types';
 import type { Settings } from './settings';
 
 export const LOCK_FILENAME = '.backup.lock';
@@ -66,6 +74,13 @@ const TRANSIENT_EXPORT_ERROR_PATTERNS = [
 
 export type BackupStatus = 'success' | 'skipped';
 
+export interface BackupChanges {
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  unchanged: number;
+}
+
 /** Directory the RAW exporter writes attachments into. */
 export const RESOURCES_DIR_NAME = 'resources';
 
@@ -106,6 +121,24 @@ export interface BackupResult {
    */
   warnings?: string[];
   message: string;
+  /** Wall-clock duration of the run, in milliseconds. */
+  durationMs?: number;
+  /** Human-readable duration, e.g. "1.2s". */
+  duration?: string;
+  /** Alias for `duration`. */
+  elapsed?: string;
+  /** Semantic change summary relative to the previous snapshot. */
+  changes?: BackupChanges;
+  /** Alias for `changes`. */
+  changed?: BackupChanges;
+  /** Alias for `changes`. */
+  diff?: BackupChanges;
+  /** Convenience count of added files. */
+  added?: number;
+  /** Convenience count of modified files. */
+  modified?: number;
+  /** Convenience count of deleted files. */
+  deleted?: number;
 }
 
 export interface BackupOptions {
@@ -507,9 +540,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   await acquireLock(lockPath, context.staleLockMs);
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
 
+  const startTime = Date.now();
+
   try {
-    const startTime = Date.now();
     logger.info('Starting backup run...');
+    void joplin.views.dialogs
+      .showToast({ message: 'Backup started…', type: ToastType.Info })
+      .catch(() => undefined);
 
     const lastSnapshotName = await resolveLastSnapshot(
       backupRoot,
@@ -529,8 +566,45 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     ) {
       const nowIso = (options.now ?? new Date()).toISOString();
       await setLastBackup(nowIso);
+      const durationMs = Date.now() - startTime;
+      const duration = `${(durationMs / 1000).toFixed(1)}s`;
+      const changes: BackupChanges = {
+        added: [],
+        modified: [],
+        deleted: [],
+        unchanged: lastManifest?.files.length ?? 0,
+      };
+      const result: BackupResult = {
+        status: 'skipped',
+        durationMs,
+        duration,
+        elapsed: duration,
+        changes,
+        changed: changes,
+        diff: changes,
+        added: 0,
+        modified: 0,
+        deleted: 0,
+        message: 'No changes detected; backup skipped.',
+      };
+      void joplin.views.dialogs
+        .showToast({ message: `Backup skipped (no changes) in ${duration}.`, type: ToastType.Info })
+        .catch(() => undefined);
+      const record = JSON.stringify({
+        status: 'skipped',
+        startedAt: new Date(startTime).toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs,
+        changes,
+        warnings: [],
+        message: result.message,
+      });
+      await setLastBackupResult(
+        `Skipped (no changes) at ${new Date().toISOString()} — ${duration}`,
+      );
+      await setLastBackupResultJson(record);
       logger.info('No changes detected; backup skipped.');
-      return { status: 'skipped', message: 'No changes detected; backup skipped.' };
+      return result;
     }
 
     const folderIds = await getAllFolderIds();
@@ -586,6 +660,29 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       { computeHash: context.computeHash, fileSizes },
     );
 
+    // Semantic change summary relative to the previous snapshot.
+    const previousFiles = lastManifest?.files ?? [];
+    const previousByPath = new Map(previousFiles.map((f) => [toManifestKey(f.path), f.sha256]));
+    const currentPaths = activeFiles.map((f) => toManifestKey(f));
+    const previousPathSet = new Set(previousByPath.keys());
+    const currentPathSet = new Set(currentPaths);
+    const added = [...currentPathSet].filter((p) => !previousPathSet.has(p)).sort();
+    const deleted = [...previousPathSet].filter((p) => !currentPathSet.has(p)).sort();
+    const modified: string[] = [];
+    let unchangedFiles = 0;
+    for (const p of currentPathSet) {
+      if (!previousPathSet.has(p)) continue;
+      const prevHash = previousByPath.get(p);
+      const currHash = dedupResult.hashes.get(p);
+      if (prevHash && currHash && prevHash !== currHash) {
+        modified.push(p);
+      } else {
+        unchangedFiles += 1;
+      }
+    }
+    modified.sort();
+    const changes: BackupChanges = { added, modified, deleted, unchanged: unchangedFiles };
+
     const joplinVersion = await resolveJoplinVersion();
     const requestedName = generateSnapshotName(options.now ?? new Date());
     const snapshotName = await resolveUniqueSnapshotName(backupRoot, requestedName);
@@ -619,7 +716,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       );
     }
 
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    const durationMs = Date.now() - startTime;
+    const elapsed = (durationMs / 1000).toFixed(1);
     logger.info(
       `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
         `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
@@ -627,7 +725,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (warnings.length ? `, ${warnings.length} warning(s)` : ''),
     );
 
-    return {
+    const duration = `${elapsed}s`;
+    const result: BackupResult = {
       status: 'success',
       snapshotName,
       snapshotDir,
@@ -637,12 +736,90 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
       warnings,
+      durationMs,
+      duration,
+      elapsed: duration,
+      changes,
+      changed: changes,
+      diff: changes,
+      added: changes.added.length,
+      modified: changes.modified.length,
+      deleted: changes.deleted.length,
       message:
-        `Backup complete: ${manifest.fileCount} files in ${snapshotName}.` +
+        `Backup complete: ${manifest.fileCount} files in ${snapshotName} in ${duration}.` +
+        (changes.added.length + changes.modified.length + changes.deleted.length > 0
+          ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
+          : ' No file changes.') +
         (warnings.length > 0
           ? ` ${warnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
           : ''),
     };
+
+    void joplin.views.dialogs
+      .showToast({
+        message:
+          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
+          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
+        type: ToastType.Success,
+        duration: 6000,
+      })
+      .catch(() => undefined);
+
+    const record = JSON.stringify({
+      status: 'success',
+      startedAt: new Date(startTime).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      snapshotName,
+      fileCount: manifest.fileCount,
+      changes,
+      warnings,
+      message: result.message,
+    });
+    const finishedIso = (options.now ?? new Date()).toISOString();
+    await setLastBackup(finishedIso);
+    await setLastSnapshot(snapshotName);
+    await setLastBackupResult(
+      `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
+        `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
+    );
+    await setLastBackupResultJson(record);
+
+    logger.info(
+      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
+        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
+        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
+        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
+    );
+
+    return result;
+  } catch (error) {
+    const durationMs = Date.now() - startTime;
+    const duration = `${(durationMs / 1000).toFixed(1)}s`;
+    logger.error('Backup failed.', error);
+    void joplin.views.dialogs
+      .showToast({
+        message: `Backup failed after ${duration}.`,
+        type: ToastType.Error,
+        duration: 6000,
+      })
+      .catch(() => undefined);
+    try {
+      const record = JSON.stringify({
+        status: 'failed',
+        startedAt: new Date(startTime).toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await setLastBackupResult(
+        `${new Date().toISOString()} — failed — ${duration} — ${error instanceof Error ? error.message : String(error)}`,
+      );
+      await setLastBackupResultJson(record);
+    } catch {
+      // Persistence must never mask the original error.
+    }
+    throw error;
   } finally {
     heartbeat.stop();
     try {

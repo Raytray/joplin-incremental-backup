@@ -316,7 +316,7 @@ describe('plugin startup (onStart)', () => {
 
     const menu = mockState.createdMenus.find((entry) => entry.id === MENU_ID);
     expect(menu?.location).toBe(MenuItemLocation.Tools);
-    expect(menu?.items).toHaveLength(2);
+    expect(menu?.items).toHaveLength(3);
 
     // backupInterval is 0 in the shared settings, so no timer is scheduled.
     const { isSchedulerRunning, stopScheduler } = await import('../src/scheduler');
