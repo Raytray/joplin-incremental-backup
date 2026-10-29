@@ -14,7 +14,7 @@
   },
   "license": "MIT",
   "keywords": [
-    "joplin-plugin"
+      "joplin-plugin", "backup"
   ],
   "files": [
     "publish"
