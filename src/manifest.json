@@ -9,7 +9,8 @@
   "homepage_url": "https://github.com/Raytray/joplin-incremental-backup",
   "repository_url": "https://github.com/Raytray/joplin-incremental-backup",
   "keywords": ["backup"],
-  "categories": [],
+  "platform": ["deskop"],
+  "categories": ["files"],
   "screenshots": [],
   "icons": {},
   "promo_tile": {}
