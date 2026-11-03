@@ -21,7 +21,6 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 - **Copy-mode warning** — if a previous snapshot exists but the filesystem doesn't support hardlinks (so every file had to be copied), a warning is shown so you know each snapshot consumes the full vault size.
 - **Durable metadata** — `manifest.json` and `latest.txt` are fsynced before and after the atomic rename, and a best-effort directory fsync is attempted so a power cut can't corrupt the snapshot index. Exported files themselves are left to OS writeback; fsyncing 20 k files per backup would be prohibitive.
 
-
 ## How to use
 
 1. Install the plugin and open **Tools > Options > Incremental Backup**.
