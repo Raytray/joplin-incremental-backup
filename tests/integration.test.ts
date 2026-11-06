@@ -372,6 +372,9 @@ describe('plugin startup (onStart)', () => {
   });
 });
 
+/** SHA-256 of no input: the digest of an empty item list. */
+const EMPTY_DIGEST = createHash('sha256').digest('hex');
+
 describe('manifest output', () => {
   it('writes a manifest.json that round-trips from disk', async () => {
     workspace.setNotes([{ id: 'n1', title: 'Note', updated_time: 100 }]);
@@ -388,6 +391,12 @@ describe('manifest output', () => {
       maxNoteUpdatedTime: 100,
       noteCount: 1,
       maxResourceUpdatedTime: 0,
+      noteDigest: createHash('sha256').update('n1:100\n').digest('hex'),
+      resourceDigest: EMPTY_DIGEST,
+      // The integration fixture's notebook has no updated_time, so it hashes as 0.
+      folderDigest: createHash('sha256').update('folder-1:0\n').digest('hex'),
+      tagDigest: EMPTY_DIGEST,
+      noteTagDigest: EMPTY_DIGEST,
     });
   });
 });

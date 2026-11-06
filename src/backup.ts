@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { createHash } from 'crypto';
 import path from 'path';
 import type { Dirent } from 'fs';
 import joplin from 'api';
@@ -19,7 +20,7 @@ import {
   toManifestKey,
   touchLock,
 } from './platform';
-import { buildManifest, readManifest, writeManifest } from './manifest';
+import { buildManifest, FINGERPRINT_DIGEST_KEYS, readManifest, writeManifest } from './manifest';
 import type { ChangeFingerprint, DeduplicationMode, ManifestMeta } from './manifest';
 import { dedup, getDeduplicationMode } from './dedup';
 import type { DedupResult } from './dedup';
@@ -47,6 +48,8 @@ export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
 
 const PAGE_LIMIT = 100;
+/** Parallel `tags/:id/notes` queries while reading note↔tag links. */
+const TAG_QUERY_CONCURRENCY = 8;
 const VERIFY_CONCURRENCY = 8;
 const SNAPSHOT_COLLISION_SUFFIX_START = 2;
 /** Floor for the lock heartbeat interval, regardless of the stale threshold. */
@@ -95,6 +98,15 @@ export interface VaultInventory {
   noteIds: string[];
   /** Number of resources in the database. */
   resourceCount: number;
+}
+
+export interface VaultInventoryOptions {
+  /**
+   * Read note↔tag links (one query per tag) into `noteTagDigest`. Only the
+   * skip-on-unchanged check needs them, so callers that will export anyway
+   * can leave them out.
+   */
+  includeNoteTags?: boolean;
 }
 
 export interface CompletenessCheckInput {
@@ -296,33 +308,41 @@ export async function resolveLastSnapshot(
   return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
 }
 
+const FINGERPRINT_KEYS: ReadonlyArray<keyof ChangeFingerprint> = [
+  'maxNoteUpdatedTime',
+  'noteCount',
+  'maxResourceUpdatedTime',
+  ...FINGERPRINT_DIGEST_KEYS,
+];
+
+/**
+ * True only when every fingerprint field matches. A field missing on one side
+ * (a manifest written by an older version) counts as a difference.
+ */
 export function fingerprintsEqual(
   a: ChangeFingerprint | null | undefined,
   b: ChangeFingerprint | null | undefined,
 ): boolean {
   if (!a || !b) return false;
-  return (
-    a.maxNoteUpdatedTime === b.maxNoteUpdatedTime &&
-    a.noteCount === b.noteCount &&
-    a.maxResourceUpdatedTime === b.maxResourceUpdatedTime
-  );
+  return FINGERPRINT_KEYS.every((key) => a[key] !== undefined && a[key] === b[key]);
 }
 
 async function paginate(
-  resource: string,
+  resource: string | string[],
   fields: string[],
   onItem: (item: Record<string, unknown>) => void,
 ): Promise<void> {
+  const dataPath = Array.isArray(resource) ? resource : [resource];
   let page = 1;
   for (;;) {
-    const response = await joplin.data.get([resource], { fields, page, limit: PAGE_LIMIT });
+    const response = await joplin.data.get(dataPath, { fields, page, limit: PAGE_LIMIT });
     const items: Array<Record<string, unknown>> = Array.isArray(response?.items)
       ? response.items
       : [];
 
     if (page === 1) {
       logger.debug(
-        `joplin.data.get("${resource}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
+        `joplin.data.get("${dataPath.join('/')}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
       );
     }
 
@@ -333,40 +353,94 @@ async function paginate(
   }
 }
 
-export async function getChangeFingerprint(): Promise<ChangeFingerprint> {
-  return (await collectVaultInventory()).fingerprint;
+export async function getChangeFingerprint(
+  options?: VaultInventoryOptions,
+): Promise<ChangeFingerprint> {
+  return (await collectVaultInventory(options)).fingerprint;
 }
 
 /**
- * Read the vault inventory in a single pass over notes and resources.
- *
- * The notes query already asks for `id`, so collecting the ids costs nothing
- * extra and the completeness check can reuse them.
+ * SHA-256 over `key:value` pairs in sorted order, so the digest does not depend
+ * on the order the API returned them in. Pairs are fed to the hash one at a
+ * time rather than joined into a single string first.
  */
-export async function collectVaultInventory(): Promise<VaultInventory> {
-  let maxNoteUpdatedTime = 0;
-  let noteCount = 0;
-  let maxResourceUpdatedTime = 0;
-  let resourceCount = 0;
+export function digestPairs(pairs: Array<readonly [string, string]>): string {
+  const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  pairs.sort((a, b) => compare(a[0], b[0]) || compare(a[1], b[1]));
+  const hash = createHash('sha256');
+  for (const [key, value] of pairs) hash.update(`${key}:${value}\n`);
+  return hash.digest('hex');
+}
+
+/**
+ * Read every `id:updated_time` pair of one item type, tracking the newest
+ * `updated_time` along the way.
+ */
+async function readItemTimes(
+  resource: string,
+  onId?: (id: string) => void,
+): Promise<{ pairs: Array<[string, string]>; maxUpdatedTime: number }> {
+  const pairs: Array<[string, string]> = [];
+  let maxUpdatedTime = 0;
+  await paginate(resource, ['id', 'updated_time'], (item) => {
+    const updated = Number(item.updated_time) || 0;
+    if (updated > maxUpdatedTime) maxUpdatedTime = updated;
+    if (typeof item.id !== 'string') return;
+    pairs.push([item.id, String(updated)]);
+    onId?.(item.id);
+  });
+  return { pairs, maxUpdatedTime };
+}
+
+/**
+ * Read the vault inventory: notes, resources, notebooks and tags, plus (when
+ * requested) the note↔tag links.
+ *
+ * Each item type is reduced to a digest of its sorted `id:updated_time`
+ * pairs, so any added, removed or changed item alters the fingerprint, even
+ * one that arrives through sync with an older timestamp than the newest
+ * local edit.
+ *
+ * Note↔tag links have no endpoint of their own, so they are read per tag
+ * (`tags/:id/notes`), with bounded concurrency.
+ */
+export async function collectVaultInventory(
+  options: VaultInventoryOptions = {},
+): Promise<VaultInventory> {
+  const { includeNoteTags = true } = options;
   const noteIds: string[] = [];
 
-  await paginate('notes', ['id', 'updated_time'], (note) => {
-    noteCount += 1;
-    if (typeof note.id === 'string') noteIds.push(note.id);
-    const updated = Number(note.updated_time) || 0;
-    if (updated > maxNoteUpdatedTime) maxNoteUpdatedTime = updated;
-  });
+  const notes = await readItemTimes('notes', (id) => noteIds.push(id));
+  const resources = await readItemTimes('resources');
+  const folders = await readItemTimes('folders');
+  const tags = await readItemTimes('tags');
 
-  await paginate('resources', ['updated_time'], (resource) => {
-    resourceCount += 1;
-    const updated = Number(resource.updated_time) || 0;
-    if (updated > maxResourceUpdatedTime) maxResourceUpdatedTime = updated;
-  });
+  let noteTagDigest: string | undefined;
+  if (includeNoteTags) {
+    const tagIds = tags.pairs.map(([id]) => id);
+    const perTag = await mapWithConcurrency(tagIds, TAG_QUERY_CONCURRENCY, async (tagId) => {
+      const links: Array<[string, string]> = [];
+      await paginate(['tags', tagId, 'notes'], ['id'], (note) => {
+        if (typeof note.id === 'string') links.push([tagId, note.id]);
+      });
+      return links;
+    });
+    noteTagDigest = digestPairs(perTag.flat());
+  }
 
   return {
-    fingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+    fingerprint: {
+      maxNoteUpdatedTime: notes.maxUpdatedTime,
+      noteCount: notes.pairs.length,
+      maxResourceUpdatedTime: resources.maxUpdatedTime,
+      noteDigest: digestPairs(notes.pairs),
+      resourceDigest: digestPairs(resources.pairs),
+      folderDigest: digestPairs(folders.pairs),
+      tagDigest: digestPairs(tags.pairs),
+      noteTagDigest,
+    },
     noteIds,
-    resourceCount,
+    resourceCount: resources.pairs.length,
   };
 }
 
@@ -556,7 +630,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const lastManifest = lastSnapshotDir ? await readManifest(lastSnapshotDir) : null;
 
     logger.info('Scanning vault for changes...');
-    const inventory = await collectVaultInventory();
+    // Reading the inventory is many Data API calls; retry the same transient
+    // errors (e.g. "database is locked" during sync) that the export retries.
+    const inventory = await retryTransient(
+      () => collectVaultInventory({ includeNoteTags: settings.onlyOnChange }),
+      context.exportRetries,
+    );
     const currentFingerprint = inventory.fingerprint;
 
     if (
@@ -607,9 +686,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       return result;
     }
 
-    const folderIds = await getAllFolderIds();
-    logger.info(`Exporting ${folderIds.length} notebook(s)...`);
+    let folderIds: string[] = [];
     const exportResult = await retryTransient(async () => {
+      // Read the notebook list right before each attempt so a notebook created
+      // or deleted during the inventory scan (or between retries) is not
+      // missed or passed to the exporter after it is gone.
+      folderIds = await getAllFolderIds();
+      logger.info(`Exporting ${folderIds.length} notebook(s)...`);
       // Each attempt starts from an empty directory so a partial export from
       // a failed attempt can never end up in the snapshot.
       await safeRmDir(activeDir);

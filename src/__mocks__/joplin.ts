@@ -28,7 +28,7 @@ export interface MockJoplinState {
   toasts: Toast[];
   showToastCalls: Toast[];
   toastMessages: string[];
-  /** Canned items returned by `data.get`, keyed by resource name. */
+  /** Canned items returned by `data.get`, keyed by `/`-joined path (e.g. `tags/t1/notes`). */
   dataItems: Record<string, Array<Record<string, unknown>>>;
   /** When set, `data.get` rejects with this error (used for transient-failure tests). */
   dataError: Error | null;
@@ -132,7 +132,8 @@ const joplin = {
     async get(path: unknown, query?: unknown): Promise<unknown> {
       if (mockState.dataError) throw mockState.dataError;
 
-      const resource = Array.isArray(path) ? String(path[0]) : String(path);
+      // Nested paths such as ['tags', id, 'notes'] are keyed as 'tags/<id>/notes'.
+      const resource = Array.isArray(path) ? path.map(String).join('/') : String(path);
       const all = mockState.dataItems[resource] ?? [];
       const page = Number((query as { page?: unknown } | undefined)?.page ?? 1) || 1;
       const limit = mockState.dataPageLimit;

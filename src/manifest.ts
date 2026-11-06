@@ -24,7 +24,36 @@ export interface ChangeFingerprint {
   maxNoteUpdatedTime: number;
   noteCount: number;
   maxResourceUpdatedTime: number;
+  /*
+   * Digests: SHA-256 over the sorted `id:updated_time` pairs of each item type
+   * (and the `tagId:noteId` links). Unlike a max timestamp they also catch
+   * changes that arrive with an *older* timestamp — e.g. an edit made on
+   * another device that syncs in after a newer local edit — as well as
+   * deletions and additions that leave counts unchanged.
+   *
+   * They are optional so manifests written by older versions still validate;
+   * a missing digest never matches, which costs one extra snapshot after
+   * upgrading.
+   */
+  noteDigest?: string;
+  resourceDigest?: string;
+  folderDigest?: string;
+  tagDigest?: string;
+  /**
+   * Tagging a note changes neither the note's nor the tag's `updated_time`,
+   * so the links are hashed directly. Only collected when skip-on-unchanged
+   * is enabled.
+   */
+  noteTagDigest?: string;
 }
+
+export const FINGERPRINT_DIGEST_KEYS = [
+  'noteDigest',
+  'resourceDigest',
+  'folderDigest',
+  'tagDigest',
+  'noteTagDigest',
+] as const;
 
 export interface Manifest {
   snapshotId: string;
@@ -62,7 +91,10 @@ function isValidFingerprint(value: unknown): value is ChangeFingerprint {
   return (
     typeof fingerprint.maxNoteUpdatedTime === 'number' &&
     typeof fingerprint.noteCount === 'number' &&
-    typeof fingerprint.maxResourceUpdatedTime === 'number'
+    typeof fingerprint.maxResourceUpdatedTime === 'number' &&
+    FINGERPRINT_DIGEST_KEYS.every(
+      (key) => fingerprint[key] === undefined || typeof fingerprint[key] === 'string',
+    )
   );
 }
 
