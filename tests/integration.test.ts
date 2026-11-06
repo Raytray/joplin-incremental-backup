@@ -388,6 +388,13 @@ describe('manifest output', () => {
       maxNoteUpdatedTime: 100,
       noteCount: 1,
       maxResourceUpdatedTime: 0,
+      resourceCount: 0,
+      folderCount: 1,
+      maxFolderUpdatedTime: 0,
+      tagCount: 0,
+      maxTagUpdatedTime: 0,
+      // SHA-256 of the empty string: no tags, so no note-tag links.
+      noteTagDigest: createHash('sha256').update('').digest('hex'),
     });
   });
 });

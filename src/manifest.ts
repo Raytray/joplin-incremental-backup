@@ -24,6 +24,26 @@ export interface ChangeFingerprint {
   maxNoteUpdatedTime: number;
   noteCount: number;
   maxResourceUpdatedTime: number;
+  /*
+   * The fields below were added later. They are optional so manifests written
+   * by older versions still validate; a manifest without them never matches a
+   * current fingerprint, which costs exactly one extra snapshot after upgrade.
+   */
+  /** Number of resources (catches deleted attachments). */
+  resourceCount?: number;
+  /** Number of notebooks (catches deleted notebooks). */
+  folderCount?: number;
+  /** Newest notebook `updated_time` (catches renamed/moved/new notebooks). */
+  maxFolderUpdatedTime?: number;
+  /** Number of tags (catches deleted tags). */
+  tagCount?: number;
+  /** Newest tag `updated_time` (catches renamed/new tags). */
+  maxTagUpdatedTime?: number;
+  /**
+   * SHA-256 of the sorted `tagId:noteId` pairs. Tagging a note does not touch
+   * the note's or the tag's `updated_time`, so the links are hashed directly.
+   */
+  noteTagDigest?: string;
 }
 
 export interface Manifest {

@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { createHash } from 'crypto';
 import path from 'path';
 import type { Dirent } from 'fs';
 import joplin from 'api';
@@ -95,6 +96,8 @@ export interface VaultInventory {
   noteIds: string[];
   /** Number of resources in the database. */
   resourceCount: number;
+  /** Ids of every notebook in the database. */
+  folderIds: string[];
 }
 
 export interface CompletenessCheckInput {
@@ -296,33 +299,46 @@ export async function resolveLastSnapshot(
   return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
 }
 
+const FINGERPRINT_KEYS: ReadonlyArray<keyof ChangeFingerprint> = [
+  'maxNoteUpdatedTime',
+  'noteCount',
+  'maxResourceUpdatedTime',
+  'resourceCount',
+  'folderCount',
+  'maxFolderUpdatedTime',
+  'tagCount',
+  'maxTagUpdatedTime',
+  'noteTagDigest',
+];
+
+/**
+ * True only when every fingerprint field matches. A field missing on one side
+ * (a manifest written by an older version) counts as a difference.
+ */
 export function fingerprintsEqual(
   a: ChangeFingerprint | null | undefined,
   b: ChangeFingerprint | null | undefined,
 ): boolean {
   if (!a || !b) return false;
-  return (
-    a.maxNoteUpdatedTime === b.maxNoteUpdatedTime &&
-    a.noteCount === b.noteCount &&
-    a.maxResourceUpdatedTime === b.maxResourceUpdatedTime
-  );
+  return FINGERPRINT_KEYS.every((key) => a[key] !== undefined && a[key] === b[key]);
 }
 
 async function paginate(
-  resource: string,
+  resource: string | string[],
   fields: string[],
   onItem: (item: Record<string, unknown>) => void,
 ): Promise<void> {
+  const dataPath = Array.isArray(resource) ? resource : [resource];
   let page = 1;
   for (;;) {
-    const response = await joplin.data.get([resource], { fields, page, limit: PAGE_LIMIT });
+    const response = await joplin.data.get(dataPath, { fields, page, limit: PAGE_LIMIT });
     const items: Array<Record<string, unknown>> = Array.isArray(response?.items)
       ? response.items
       : [];
 
     if (page === 1) {
       logger.debug(
-        `joplin.data.get("${resource}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
+        `joplin.data.get("${dataPath.join('/')}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
       );
     }
 
@@ -338,17 +354,26 @@ export async function getChangeFingerprint(): Promise<ChangeFingerprint> {
 }
 
 /**
- * Read the vault inventory in a single pass over notes and resources.
+ * Read the vault inventory in a single pass over notes, resources, notebooks
+ * and tags.
  *
- * The notes query already asks for `id`, so collecting the ids costs nothing
- * extra and the completeness check can reuse them.
+ * The notes and notebook queries already ask for `id`, so collecting the ids
+ * costs nothing extra and the completeness check and export can reuse them.
+ *
+ * Note↔tag links have no endpoint of their own and tagging a note changes
+ * neither the note's nor the tag's `updated_time`, so the links are read per
+ * tag (`tags/:id/notes`) and hashed into `noteTagDigest`.
  */
 export async function collectVaultInventory(): Promise<VaultInventory> {
   let maxNoteUpdatedTime = 0;
   let noteCount = 0;
   let maxResourceUpdatedTime = 0;
   let resourceCount = 0;
+  let maxFolderUpdatedTime = 0;
+  let maxTagUpdatedTime = 0;
   const noteIds: string[] = [];
+  const folderIds: string[] = [];
+  const tagIds: string[] = [];
 
   await paginate('notes', ['id', 'updated_time'], (note) => {
     noteCount += 1;
@@ -363,10 +388,41 @@ export async function collectVaultInventory(): Promise<VaultInventory> {
     if (updated > maxResourceUpdatedTime) maxResourceUpdatedTime = updated;
   });
 
+  await paginate('folders', ['id', 'updated_time'], (folder) => {
+    if (typeof folder.id === 'string') folderIds.push(folder.id);
+    const updated = Number(folder.updated_time) || 0;
+    if (updated > maxFolderUpdatedTime) maxFolderUpdatedTime = updated;
+  });
+
+  await paginate('tags', ['id', 'updated_time'], (tag) => {
+    if (typeof tag.id === 'string') tagIds.push(tag.id);
+    const updated = Number(tag.updated_time) || 0;
+    if (updated > maxTagUpdatedTime) maxTagUpdatedTime = updated;
+  });
+
+  const noteTagPairs: string[] = [];
+  for (const tagId of tagIds) {
+    await paginate(['tags', tagId, 'notes'], ['id'], (note) => {
+      if (typeof note.id === 'string') noteTagPairs.push(`${tagId}:${note.id}`);
+    });
+  }
+  const noteTagDigest = createHash('sha256').update(noteTagPairs.sort().join('\n')).digest('hex');
+
   return {
-    fingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+    fingerprint: {
+      maxNoteUpdatedTime,
+      noteCount,
+      maxResourceUpdatedTime,
+      resourceCount,
+      folderCount: folderIds.length,
+      maxFolderUpdatedTime,
+      tagCount: tagIds.length,
+      maxTagUpdatedTime,
+      noteTagDigest,
+    },
     noteIds,
     resourceCount,
+    folderIds,
   };
 }
 
@@ -607,7 +663,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       return result;
     }
 
-    const folderIds = await getAllFolderIds();
+    const { folderIds } = inventory;
     logger.info(`Exporting ${folderIds.length} notebook(s)...`);
     const exportResult = await retryTransient(async () => {
       // Each attempt starts from an empty directory so a partial export from

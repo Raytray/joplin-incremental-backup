@@ -74,14 +74,21 @@ function stubExport(files: Array<{ path: string; content: string }>): void {
 
 function setData(options: {
   notes?: Array<{ id: string; updated_time: number }>;
-  folders?: Array<{ id: string }>;
+  folders?: Array<{ id: string; updated_time?: number }>;
   resources?: Array<{ updated_time: number }>;
+  tags?: Array<{ id: string; updated_time?: number }>;
+  /** Tag id → ids of the notes carrying that tag. */
+  noteTags?: Record<string, string[]>;
 }): void {
   mockState.dataItems = {
     notes: options.notes ?? [],
     folders: options.folders ?? [{ id: 'folder-1' }],
     resources: options.resources ?? [],
+    tags: options.tags ?? [],
   };
+  for (const [tagId, noteIds] of Object.entries(options.noteTags ?? {})) {
+    mockState.dataItems[`tags/${tagId}/notes`] = noteIds.map((id) => ({ id }));
+  }
 }
 
 const FIXED_DATE = new Date('2026-01-02T03:04:05.000Z');
@@ -115,11 +122,28 @@ describe('pure helpers', () => {
   });
 
   it('compares fingerprints strictly, rejecting missing ones', () => {
-    const a = { maxNoteUpdatedTime: 1, noteCount: 2, maxResourceUpdatedTime: 3 };
+    const a = {
+      maxNoteUpdatedTime: 1,
+      noteCount: 2,
+      maxResourceUpdatedTime: 3,
+      resourceCount: 4,
+      folderCount: 5,
+      maxFolderUpdatedTime: 6,
+      tagCount: 7,
+      maxTagUpdatedTime: 8,
+      noteTagDigest: 'abc',
+    };
     expect(fingerprintsEqual(a, { ...a })).toBe(true);
     expect(fingerprintsEqual(a, { ...a, noteCount: 3 })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, noteTagDigest: 'def' })).toBe(false);
     expect(fingerprintsEqual(a, undefined)).toBe(false);
     expect(fingerprintsEqual(undefined, a)).toBe(false);
+  });
+
+  it('treats a legacy fingerprint (missing newer fields) as different', () => {
+    const legacy = { maxNoteUpdatedTime: 1, noteCount: 2, maxResourceUpdatedTime: 3 };
+    expect(fingerprintsEqual(legacy, { ...legacy })).toBe(false);
+    expect(fingerprintsEqual(legacy, { ...legacy, resourceCount: 0 })).toBe(false);
   });
 
   it('detects transient export errors', () => {
@@ -197,20 +221,48 @@ describe('recoverBackupDirs', () => {
   });
 });
 describe('getChangeFingerprint', () => {
-  it('collects max note time, note count, and max resource time', async () => {
+  it('collects note, resource, notebook and tag counts and times', async () => {
     setData({
       notes: [
         { id: 'n1', updated_time: 100 },
         { id: 'n2', updated_time: 500 },
       ],
       resources: [{ updated_time: 42 }, { updated_time: 900 }],
+      folders: [
+        { id: 'f1', updated_time: 7 },
+        { id: 'f2', updated_time: 70 },
+      ],
+      tags: [{ id: 't1', updated_time: 33 }],
+      noteTags: { t1: ['n1'] },
     });
 
     await expect(getChangeFingerprint()).resolves.toEqual({
       maxNoteUpdatedTime: 500,
       noteCount: 2,
       maxResourceUpdatedTime: 900,
+      resourceCount: 2,
+      folderCount: 2,
+      maxFolderUpdatedTime: 70,
+      tagCount: 1,
+      maxTagUpdatedTime: 33,
+      noteTagDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+  });
+
+  it('produces an order-independent note-tag digest', async () => {
+    setData({
+      tags: [{ id: 't1' }, { id: 't2' }],
+      noteTags: { t1: ['n1', 'n2'], t2: ['n3'] },
+    });
+    const a = await getChangeFingerprint();
+
+    setData({
+      tags: [{ id: 't2' }, { id: 't1' }],
+      noteTags: { t1: ['n2', 'n1'], t2: ['n3'] },
+    });
+    const b = await getChangeFingerprint();
+
+    expect(a.noteTagDigest).toBe(b.noteTagDigest);
   });
 
   it('paginates across multiple pages', async () => {
@@ -401,6 +453,119 @@ describe('runBackup — onlyOnChange', () => {
 
     expect(second.status).toBe('success');
     expect(second.snapshotName).toBe('20260102T040000');
+  });
+
+  it('takes a new snapshot when a resource is deleted', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ updated_time: 10 }, { updated_time: 5 }],
+    });
+    await run();
+
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 10 }] });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook is renamed', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 2 }],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook is added', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 1 },
+        { id: 'f2', updated_time: 1 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a tag is renamed', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], tags: [{ id: 't1', updated_time: 1 }] });
+    await run();
+
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], tags: [{ id: 't1', updated_time: 2 }] });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a note is tagged without other timestamps changing', async () => {
+    const base = {
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      tags: [{ id: 't1', updated_time: 1 }],
+    };
+    setData({ ...base, noteTags: { t1: [] } });
+    await run();
+
+    setData({ ...base, noteTags: { t1: ['n1'] } });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('skips when notebooks, tags and links are all unchanged', async () => {
+    const data = {
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+      tags: [{ id: 't1', updated_time: 1 }],
+      noteTags: { t1: ['n1'] },
+    };
+    setData(data);
+    await run();
+
+    setData(data);
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('skipped');
+  });
+
+  it('takes one new snapshot when the stored fingerprint predates the newer fields', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const first = await run();
+    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+
+    const manifest = (await readManifest(snapshotDir))!;
+    const { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime } = manifest.changeFingerprint;
+    await fs.writeFile(
+      path.join(snapshotDir, MANIFEST_FILENAME),
+      JSON.stringify({
+        ...manifest,
+        changeFingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+      }),
+    );
+
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+    expect(second.status).toBe('success');
+
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const third = await run({ now: new Date('2026-01-02T05:00:00.000Z') });
+    expect(third.status).toBe('skipped');
   });
 
   it('always snapshots when the stored manifest has no fingerprint', async () => {
