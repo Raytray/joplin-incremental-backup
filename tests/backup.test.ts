@@ -13,6 +13,7 @@ import {
   ACTIVE_DIR_PREFIX,
   collectActiveFiles,
   createStagingDirName,
+  digestPairs,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -33,7 +34,7 @@ import {
 import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { logger } from '../src/logger';
-import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
+import joplin, { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
@@ -75,7 +76,7 @@ function stubExport(files: Array<{ path: string; content: string }>): void {
 function setData(options: {
   notes?: Array<{ id: string; updated_time: number }>;
   folders?: Array<{ id: string; updated_time?: number }>;
-  resources?: Array<{ updated_time: number }>;
+  resources?: Array<{ id: string; updated_time: number }>;
   tags?: Array<{ id: string; updated_time?: number }>;
   /** Tag id → ids of the notes carrying that tag. */
   noteTags?: Record<string, string[]>;
@@ -126,24 +127,43 @@ describe('pure helpers', () => {
       maxNoteUpdatedTime: 1,
       noteCount: 2,
       maxResourceUpdatedTime: 3,
-      resourceCount: 4,
-      folderCount: 5,
-      maxFolderUpdatedTime: 6,
-      tagCount: 7,
-      maxTagUpdatedTime: 8,
-      noteTagDigest: 'abc',
+      noteDigest: 'n',
+      resourceDigest: 'r',
+      folderDigest: 'f',
+      tagDigest: 't',
+      noteTagDigest: 'nt',
     };
     expect(fingerprintsEqual(a, { ...a })).toBe(true);
     expect(fingerprintsEqual(a, { ...a, noteCount: 3 })).toBe(false);
-    expect(fingerprintsEqual(a, { ...a, noteTagDigest: 'def' })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, folderDigest: 'f2' })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, noteTagDigest: undefined })).toBe(false);
     expect(fingerprintsEqual(a, undefined)).toBe(false);
     expect(fingerprintsEqual(undefined, a)).toBe(false);
   });
 
-  it('treats a legacy fingerprint (missing newer fields) as different', () => {
+  it('treats a legacy fingerprint (missing digests) as different', () => {
     const legacy = { maxNoteUpdatedTime: 1, noteCount: 2, maxResourceUpdatedTime: 3 };
     expect(fingerprintsEqual(legacy, { ...legacy })).toBe(false);
-    expect(fingerprintsEqual(legacy, { ...legacy, resourceCount: 0 })).toBe(false);
+  });
+
+  it('digestPairs is order-independent and sensitive to every pair', () => {
+    const base = digestPairs([
+      ['a', '1'],
+      ['b', '2'],
+    ]);
+    expect(
+      digestPairs([
+        ['b', '2'],
+        ['a', '1'],
+      ]),
+    ).toBe(base);
+    expect(
+      digestPairs([
+        ['a', '1'],
+        ['b', '3'],
+      ]),
+    ).not.toBe(base);
+    expect(digestPairs([['a', '1']])).not.toBe(base);
   });
 
   it('detects transient export errors', () => {
@@ -227,7 +247,10 @@ describe('getChangeFingerprint', () => {
         { id: 'n1', updated_time: 100 },
         { id: 'n2', updated_time: 500 },
       ],
-      resources: [{ updated_time: 42 }, { updated_time: 900 }],
+      resources: [
+        { id: 'r1', updated_time: 42 },
+        { id: 'r2', updated_time: 900 },
+      ],
       folders: [
         { id: 'f1', updated_time: 7 },
         { id: 'f2', updated_time: 70 },
@@ -236,17 +259,29 @@ describe('getChangeFingerprint', () => {
       noteTags: { t1: ['n1'] },
     });
 
-    await expect(getChangeFingerprint()).resolves.toEqual({
+    const fingerprint = await getChangeFingerprint();
+    expect(fingerprint).toEqual({
       maxNoteUpdatedTime: 500,
       noteCount: 2,
       maxResourceUpdatedTime: 900,
-      resourceCount: 2,
-      folderCount: 2,
-      maxFolderUpdatedTime: 70,
-      tagCount: 1,
-      maxTagUpdatedTime: 33,
+      noteDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      resourceDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      folderDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      tagDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
       noteTagDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+  });
+
+  it('leaves out note-tag links (and their queries) when asked to', async () => {
+    setData({ tags: [{ id: 't1' }], noteTags: { t1: ['n1'] } });
+    const get = vi.spyOn(joplin.data, 'get');
+    try {
+      const fingerprint = await getChangeFingerprint({ includeNoteTags: false });
+      expect(fingerprint.noteTagDigest).toBeUndefined();
+      expect(get.mock.calls.some(([dataPath]) => (dataPath as string[]).length > 1)).toBe(false);
+    } finally {
+      get.mockRestore();
+    }
   });
 
   it('produces an order-independent note-tag digest', async () => {
@@ -445,10 +480,16 @@ describe('runBackup — onlyOnChange', () => {
   });
 
   it('takes a new snapshot when a resource changes', async () => {
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 10 }] });
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 10 }],
+    });
     await run();
 
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 999 }] });
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 999 }],
+    });
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
 
     expect(second.status).toBe('success');
@@ -458,11 +499,17 @@ describe('runBackup — onlyOnChange', () => {
   it('takes a new snapshot when a resource is deleted', async () => {
     setData({
       notes: [{ id: 'n1', updated_time: 1000 }],
-      resources: [{ updated_time: 10 }, { updated_time: 5 }],
+      resources: [
+        { id: 'r1', updated_time: 10 },
+        { id: 'r2', updated_time: 5 },
+      ],
     });
     await run();
 
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 10 }] });
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 10 }],
+    });
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
 
     expect(second.status).toBe('success');
@@ -568,6 +615,71 @@ describe('runBackup — onlyOnChange', () => {
     expect(third.status).toBe('skipped');
   });
 
+  it('takes a new snapshot when a synced edit arrives with an older timestamp', async () => {
+    // n2 is the newest local edit; n1 was edited elsewhere earlier and syncs
+    // in afterwards. Max time and count are unchanged, so only the digest
+    // can notice.
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 100 },
+        { id: 'n2', updated_time: 500 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 300 },
+        { id: 'n2', updated_time: 500 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook rename syncs in with an older timestamp', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 1 },
+        { id: 'f2', updated_time: 50 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 20 },
+        { id: 'f2', updated_time: 50 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when one note is deleted and an older one imported', async () => {
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 1000 },
+        { id: 'n2', updated_time: 10 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 1000 },
+        { id: 'n3', updated_time: 5 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
   it('always snapshots when the stored manifest has no fingerprint', async () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
     const first = await run();
@@ -584,6 +696,43 @@ describe('runBackup — onlyOnChange', () => {
 });
 
 describe('runBackup — failures', () => {
+  it('retries a transient error while reading the vault inventory', async () => {
+    const get = vi.spyOn(joplin.data, 'get').mockRejectedValueOnce(new Error('database is locked'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await run();
+      expect(result.status).toBe('success');
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it('re-reads the notebook list before each export attempt', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], folders: [{ id: 'f-old' }] });
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const exportedWith: unknown[] = [];
+    let attempt = 0;
+    mockState.commandHandlers.exportFolders = async (ids, _format, target) => {
+      attempt += 1;
+      exportedWith.push(ids);
+      if (attempt === 1) {
+        // A notebook is created and another deleted while the first attempt runs.
+        mockState.dataItems.folders = [{ id: 'f-new' }];
+        throw new Error('database is locked');
+      }
+      const dir = String(target);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
+      await fs.writeFile(path.join(dir, 'f-new.md'), 'folder');
+    };
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(exportedWith).toEqual([['f-old'], ['f-new']]);
+    expect(result.warnings).toEqual([]);
+  });
+
   it('aborts before locking or snapshotting when disk space is insufficient', async () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
 

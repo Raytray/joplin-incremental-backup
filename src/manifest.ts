@@ -25,26 +25,35 @@ export interface ChangeFingerprint {
   noteCount: number;
   maxResourceUpdatedTime: number;
   /*
-   * The fields below were added later. They are optional so manifests written
-   * by older versions still validate; a manifest without them never matches a
-   * current fingerprint, which costs exactly one extra snapshot after upgrade.
+   * Digests: SHA-256 over the sorted `id:updated_time` pairs of each item type
+   * (and the `tagId:noteId` links). Unlike a max timestamp they also catch
+   * changes that arrive with an *older* timestamp — e.g. an edit made on
+   * another device that syncs in after a newer local edit — as well as
+   * deletions and additions that leave counts unchanged.
+   *
+   * They are optional so manifests written by older versions still validate;
+   * a missing digest never matches, which costs one extra snapshot after
+   * upgrading.
    */
-  /** Number of resources (catches deleted attachments). */
-  resourceCount?: number;
-  /** Number of notebooks (catches deleted notebooks). */
-  folderCount?: number;
-  /** Newest notebook `updated_time` (catches renamed/moved/new notebooks). */
-  maxFolderUpdatedTime?: number;
-  /** Number of tags (catches deleted tags). */
-  tagCount?: number;
-  /** Newest tag `updated_time` (catches renamed/new tags). */
-  maxTagUpdatedTime?: number;
+  noteDigest?: string;
+  resourceDigest?: string;
+  folderDigest?: string;
+  tagDigest?: string;
   /**
-   * SHA-256 of the sorted `tagId:noteId` pairs. Tagging a note does not touch
-   * the note's or the tag's `updated_time`, so the links are hashed directly.
+   * Tagging a note changes neither the note's nor the tag's `updated_time`,
+   * so the links are hashed directly. Only collected when skip-on-unchanged
+   * is enabled.
    */
   noteTagDigest?: string;
 }
+
+export const FINGERPRINT_DIGEST_KEYS = [
+  'noteDigest',
+  'resourceDigest',
+  'folderDigest',
+  'tagDigest',
+  'noteTagDigest',
+] as const;
 
 export interface Manifest {
   snapshotId: string;
@@ -82,7 +91,10 @@ function isValidFingerprint(value: unknown): value is ChangeFingerprint {
   return (
     typeof fingerprint.maxNoteUpdatedTime === 'number' &&
     typeof fingerprint.noteCount === 'number' &&
-    typeof fingerprint.maxResourceUpdatedTime === 'number'
+    typeof fingerprint.maxResourceUpdatedTime === 'number' &&
+    FINGERPRINT_DIGEST_KEYS.every(
+      (key) => fingerprint[key] === undefined || typeof fingerprint[key] === 'string',
+    )
   );
 }
 

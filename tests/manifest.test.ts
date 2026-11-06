@@ -147,4 +147,29 @@ describe('isValidManifest', () => {
     const manifest = await buildManifest(SNAPSHOT, meta());
     expect(isValidManifest({ ...manifest, changeFingerprint: { noteCount: 1 } })).toBe(false);
   });
+
+  it('accepts a legacy fingerprint without digests', async () => {
+    await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
+    const manifest = await buildManifest(SNAPSHOT, meta());
+    const { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime } = manifest.changeFingerprint;
+    expect(
+      isValidManifest({
+        ...manifest,
+        changeFingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a fingerprint whose digests have the wrong type', async () => {
+    await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
+    const manifest = await buildManifest(SNAPSHOT, meta());
+    for (const bad of [{ noteTagDigest: 123 }, { folderDigest: null }, { noteDigest: ['x'] }]) {
+      expect(
+        isValidManifest({
+          ...manifest,
+          changeFingerprint: { ...manifest.changeFingerprint, ...bad },
+        }),
+      ).toBe(false);
+    }
+  });
 });
