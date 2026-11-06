@@ -725,6 +725,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
 
+    // Persist the committed snapshot immediately so settings never lag behind
+    // what is on disk, even if later result/message building throws.
+    const finishedIso = (options.now ?? new Date()).toISOString();
+    await setLastBackup(finishedIso);
+    await setLastSnapshot(snapshotName);
+
     // Warn if hardlinks are unsupported — the user may not realize each snapshot
     // consumes full vault size when the filesystem falls back to copies.
     if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
@@ -735,13 +741,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     const durationMs = Date.now() - startTime;
     const elapsed = (durationMs / 1000).toFixed(1);
-    logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
-        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
-        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
-        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
-    );
-
     const duration = `${elapsed}s`;
     const result: BackupResult = {
       status: 'success',
@@ -770,16 +769,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         describeWarnings(exportWarnings.length, completenessWarnings.length),
     };
 
-    void joplin.views.dialogs
-      .showToast({
-        message:
-          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
-          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
-        type: ToastType.Success,
-        duration: 6000,
-      })
-      .catch(() => undefined);
-
     const record = JSON.stringify({
       status: 'success',
       startedAt: new Date(startTime).toISOString(),
@@ -791,14 +780,28 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings,
       message: result.message,
     });
-    const finishedIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(finishedIso);
-    await setLastSnapshot(snapshotName);
     await setLastBackupResult(
       `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
         `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
     );
     await setLastBackupResultJson(record);
+
+    // Only announce completion once everything has been persisted.
+    logger.info(
+      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
+        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
+        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
+        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
+    );
+    void joplin.views.dialogs
+      .showToast({
+        message:
+          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
+          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
+        type: ToastType.Success,
+        duration: 6000,
+      })
+      .catch(() => undefined);
 
     return result;
   } catch (error) {
