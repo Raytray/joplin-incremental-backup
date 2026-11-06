@@ -59,6 +59,27 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+/**
+ * Summary sentence for the result message. Only exporter warnings are items
+ * the exporter itself reported as skipped; completeness warnings are inferred
+ * from a count mismatch, and other warnings (e.g. no hardlink support) don't
+ * affect what the snapshot contains, so each is described separately.
+ */
+export function describeWarnings(
+  exportWarningCount: number,
+  completenessWarningCount: number,
+): string {
+  const parts: string[] = [];
+  if (exportWarningCount > 0) {
+    parts.push(`${exportWarningCount} item(s) were skipped by the export.`);
+  }
+  if (completenessWarningCount > 0) {
+    parts.push('Some items in the database are missing from the export.');
+  }
+  if (parts.length === 0) return '';
+  return ` ${parts.join(' ')} The snapshot may be incomplete (see warnings).`;
+}
+
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
   /database is locked/i,
   /SQLITE_BUSY/i,
@@ -704,10 +725,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
 
-    const nowIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(nowIso);
-    await setLastSnapshot(snapshotName);
-
     // Warn if hardlinks are unsupported — the user may not realize each snapshot
     // consumes full vault size when the filesystem falls back to copies.
     if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
@@ -750,9 +767,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
           ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
           : ' No file changes.') +
-        (warnings.length > 0
-          ? ` ${warnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
-          : ''),
+        describeWarnings(exportWarnings.length, completenessWarnings.length),
     };
 
     void joplin.views.dialogs
@@ -784,13 +799,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
     );
     await setLastBackupResultJson(record);
-
-    logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
-        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
-        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
-        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
-    );
 
     return result;
   } catch (error) {

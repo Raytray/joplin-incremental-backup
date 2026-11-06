@@ -13,6 +13,7 @@ import {
   ACTIVE_DIR_PREFIX,
   collectActiveFiles,
   createStagingDirName,
+  describeWarnings,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -415,6 +416,66 @@ describe('runBackup — onlyOnChange', () => {
     stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
+  });
+});
+
+describe('describeWarnings', () => {
+  it('is empty when there are no content warnings', () => {
+    expect(describeWarnings(0, 0)).toBe('');
+  });
+
+  it('counts only exporter warnings as skipped items', () => {
+    const text = describeWarnings(2, 0);
+    expect(text).toMatch(/2 item\(s\) were skipped by the export/);
+    expect(text).toMatch(/may be incomplete/);
+  });
+
+  it('describes completeness warnings without claiming the exporter skipped them', () => {
+    const text = describeWarnings(0, 3);
+    expect(text).not.toMatch(/skipped by the export/);
+    expect(text).toMatch(/missing from the export/);
+    expect(text).toMatch(/may be incomplete/);
+  });
+});
+
+describe('runBackup — success bookkeeping', () => {
+  it('reports the hardlink fallback as a warning without calling the snapshot incomplete', async () => {
+    await run();
+
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+    try {
+      stubExport([{ path: 'n1.md', content: 'hello' }]);
+      setData({ notes: [{ id: 'n1', updated_time: 2000 }], folders: [] });
+      const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+      expect(second.status).toBe('success');
+      expect(second.warnings).toEqual([expect.stringMatching(/Hardlinks are not supported/)]);
+      expect(second.message).not.toMatch(/skipped by the export/);
+      expect(second.message).not.toMatch(/may be incomplete/);
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  it('persists lastBackup/lastSnapshot and logs completion exactly once', async () => {
+    const info = vi.spyOn(logger, 'info');
+    try {
+      const result = await run();
+
+      const writes = (key: string) => mockState.setValues.filter((entry) => entry.key === key);
+      expect(writes(SETTING_KEYS.lastBackup)).toHaveLength(1);
+      expect(writes(SETTING_KEYS.lastSnapshot)).toEqual([
+        { key: SETTING_KEYS.lastSnapshot, value: result.snapshotName },
+      ]);
+      const completions = info.mock.calls.filter(
+        ([message]) => typeof message === 'string' && message.startsWith('Backup complete'),
+      );
+      expect(completions).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 });
 
