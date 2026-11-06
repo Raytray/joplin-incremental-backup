@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('fs/promises', async () => {
   const memfs = await import('memfs');
@@ -11,6 +11,7 @@ import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import { buildContentIndex, dedup, getDeduplicationMode, replaceWithLink } from '../src/dedup';
 import type { FileEntry, Manifest } from '../src/manifest';
+import { logger } from '../src/logger';
 
 const PREVIOUS = '/snapshots/20260101T000000';
 const ACTIVE = '/export/active';
@@ -211,20 +212,35 @@ describe('replaceWithLink', () => {
     ).toBe(false);
   });
 
-  it('copies when the filesystem refuses to hardlink', async () => {
+  it('keeps the exported file untouched when the filesystem refuses to hardlink', async () => {
     await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'shared' }]);
     await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'shared' }]);
+    const before = await fs.stat(path.join(ACTIVE, 'a.txt'));
 
     const linkSpy = vi
       .spyOn(fs, 'link')
       .mockRejectedValueOnce(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+    const copySpy = vi.spyOn(fs, 'copyFile');
+    const renameSpy = vi.spyOn(fs, 'rename');
 
     const mode = await replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt'));
 
+    expect(copySpy).not.toHaveBeenCalled();
+    expect(renameSpy).not.toHaveBeenCalled();
     linkSpy.mockRestore();
+    copySpy.mockRestore();
+    renameSpy.mockRestore();
 
     expect(mode).toBe('copy');
+    const after = await fs.stat(path.join(ACTIVE, 'a.txt'));
+    expect(after.ino).toBe(before.ino);
     expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('shared');
+    expect(
+      await fs
+        .stat(path.join(ACTIVE, 'a.txt.dedup_tmp'))
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
   });
 });
 
@@ -268,6 +284,64 @@ describe('dedup — failure handling', () => {
 
     expect(result.hashes.get('Note.md')).toBe(sha256('upper'));
     expect(result.hashes.get('note.md')).toBe(sha256('lower'));
+  });
+});
+
+describe('dedup — no hardlink support', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const files = [
+    { path: 'a.txt', content: 'one' },
+    { path: 'b.txt', content: 'two' },
+    { path: 'resources/c', content: 'three' },
+  ];
+
+  it('tries to link once per run and rewrites nothing', async () => {
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(ACTIVE, files);
+    const manifest = makeManifest(files);
+
+    const linkSpy = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('cross-device'), { code: 'EXDEV' }));
+    const copySpy = vi.spyOn(fs, 'copyFile');
+
+    const result = await dedup(
+      ACTIVE,
+      PREVIOUS,
+      manifest,
+      files.map((f) => f.path),
+    );
+
+    expect(linkSpy).toHaveBeenCalledTimes(1);
+    expect(copySpy).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ hardlinked: 0, copied: 3, unchanged: 0, failed: 0 });
+    expect(getDeduplicationMode(result)).toBe('copy');
+    for (const file of files) {
+      expect(await fs.readFile(path.join(ACTIVE, file.path), 'utf8')).toBe(file.content);
+    }
+  });
+
+  it('keeps linking after a per-file failure on the first attempt', async () => {
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(ACTIVE, files);
+    const manifest = makeManifest(files);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    vi.spyOn(fs, 'link').mockRejectedValueOnce(
+      Object.assign(new Error('too many links'), { code: 'EMLINK' }),
+    );
+
+    const result = await dedup(
+      ACTIVE,
+      PREVIOUS,
+      manifest,
+      files.map((f) => f.path),
+    );
+
+    expect(result).toMatchObject({ hardlinked: 2, copied: 0, failed: 1 });
   });
 });
 

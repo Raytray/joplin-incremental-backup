@@ -174,18 +174,12 @@ export async function releaseLock(lockPath: string): Promise<void> {
 }
 
 /**
- * Hardlink `src` to `dest`, falling back to a copy on platforms/filesystems
- * that do not support hardlinks (notably Windows without privileges).
+ * True when `fs.link` failed because the filesystem or platform cannot create
+ * hardlinks here (FAT/exFAT, most network shares, cross-device, Windows
+ * without privileges), as opposed to a problem with this particular file.
  */
-export async function hardlinkOrCopy(src: string, dest: string): Promise<'hardlink' | 'copy'> {
-  try {
-    await fs.link(src, dest);
-    return 'hardlink';
-  } catch (error) {
-    if (!HARDLINK_FALLBACK_CODES.has(errorCode(error) ?? '')) throw error;
-    await fs.copyFile(src, dest);
-    return 'copy';
-  }
+export function isHardlinkUnsupportedError(error: unknown): boolean {
+  return HARDLINK_FALLBACK_CODES.has(errorCode(error) ?? '');
 }
 
 /**
