@@ -58,6 +58,8 @@ The first backup to a directory creates it and writes a marker file, `.joplin-in
 
 If you moved or deleted the backups on purpose, create an empty `.joplin-incremental-backup` file in the directory, or choose a different directory.
 
+When upgrading from a version without the marker, the first backup adopts your existing backup directory. If that directory does not exist at that point but backups have been made before, the plugin assumes the drive is not mounted and refuses rather than creating it. If it really is a new location, create the directory yourself and the next backup will use it.
+
 ### Scheduler catch-up behaviour
 
 When Joplin starts, the plugin checks when the last successful backup finished:

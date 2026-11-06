@@ -27,6 +27,7 @@ import { listSnapshots, pruneSnapshots } from './retention';
 import {
   addInitializedBackupRoot,
   getSettings,
+  isKnownBackupRoot,
   requireBackupPath,
   setLastBackup,
   setLastSnapshot,
@@ -664,6 +665,25 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.stat(target);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export function legacyBackupRootMissingMessage(backupRoot: string): string {
+  return (
+    `The backup directory "${backupRoot}" does not exist, but backups have been made ` +
+    'before. If the backup drive is disconnected or not mounted, reconnect it and try ' +
+    'again. If this is a new location, create the directory first, or choose a ' +
+    'different one in Tools > Options > Incremental Backup.'
+  );
+}
+
 export function backupRootUnavailableMessage(backupRoot: string): string {
   return (
     `The backup directory "${backupRoot}" is not available: its marker file ` +
@@ -683,20 +703,35 @@ export function backupRootUnavailableMessage(backupRoot: string): string {
  * disk-space check measures the wrong filesystem, and the snapshots end up
  * hidden underneath the mount point once the drive comes back.
  *
- * - Marker present → ready.
+ * - Marker present → ready, and remembered so its later disappearance is
+ *   caught (covers markers created by hand or by another profile).
  * - Marker missing, directory set up before → refuse (drive likely missing).
  * - Marker missing, directory never set up → create it and write the marker.
- *   This includes directories used by versions before the marker existed.
+ *   This includes directories used by versions before the marker existed,
+ *   with one exception: if backups were made before (`hasBackedUpBefore`) but
+ *   no directory has been recorded yet, this is the first run after upgrading,
+ *   and a directory that does not exist is far more likely an unmounted drive
+ *   than a new location. Creating it would put the marker on the internal
+ *   disk and lock the real drive out once it is mounted, so refuse instead.
  */
 export async function prepareBackupRoot(
   backupRoot: string,
   initializedRoots: readonly string[],
+  hasBackedUpBefore = false,
 ): Promise<void> {
   const markerPath = path.join(backupRoot, ROOT_MARKER_FILENAME);
-  if (await fileExists(markerPath)) return;
+  const known = isKnownBackupRoot(backupRoot, initializedRoots);
+  if (await fileExists(markerPath)) {
+    if (!known) await addInitializedBackupRoot(backupRoot);
+    return;
+  }
 
-  if (initializedRoots.includes(backupRoot)) {
+  if (known) {
     throw new Error(backupRootUnavailableMessage(backupRoot));
+  }
+
+  if (hasBackedUpBefore && initializedRoots.length === 0 && !(await pathExists(backupRoot))) {
+    throw new Error(legacyBackupRootMissingMessage(backupRoot));
   }
 
   await ensureBackupRoot(backupRoot);
@@ -749,7 +784,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   let context: ResolvedContext;
   try {
     context = await resolveContext(options);
-    await prepareBackupRoot(context.backupRoot, context.settings.initializedBackupRoots);
+    await prepareBackupRoot(
+      context.backupRoot,
+      context.settings.initializedBackupRoots,
+      context.settings.lastBackup !== '',
+    );
     // Gate before locking: never commit to a run (or leave a lock behind) when
     // there is provably not enough space.
     await assertDiskSpace(context.backupRoot, context.minFreeBytes);

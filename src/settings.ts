@@ -302,12 +302,34 @@ export async function setLastBackupResultJson(value: string): Promise<void> {
   await joplin.settings.setValue(SETTING_KEYS.lastBackupResultJson, value);
 }
 
+/**
+ * Comparison key for a backup directory, so different spellings of the same
+ * path (`/a//b`, `/a/./b`, `/a/b/`, and on Windows `E:\B` vs `e:/b`) match.
+ */
+export function backupRootKey(
+  backupRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32') return path.win32.resolve(backupRoot).toLowerCase();
+  return path.posix.resolve(backupRoot);
+}
+
+/** Whether `backupRoot` is one of `roots`, ignoring differences in spelling. */
+export function isKnownBackupRoot(
+  backupRoot: string,
+  roots: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const key = backupRootKey(backupRoot, platform);
+  return roots.some((root) => backupRootKey(root, platform) === key);
+}
+
 /** Remember that `backupRoot` has been set up, so a later disappearance is detected. */
 export async function addInitializedBackupRoot(backupRoot: string): Promise<void> {
   const { initializedBackupRoots } = await getSettings();
-  if (initializedBackupRoots.includes(backupRoot)) return;
+  if (isKnownBackupRoot(backupRoot, initializedBackupRoots)) return;
   await joplin.settings.setValue(
     SETTING_KEYS.initializedBackupRoots,
-    JSON.stringify([...initializedBackupRoots, backupRoot]),
+    JSON.stringify([...initializedBackupRoots, path.resolve(backupRoot)]),
   );
 }

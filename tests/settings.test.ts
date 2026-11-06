@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  addInitializedBackupRoot,
+  isKnownBackupRoot,
   buildSettings,
   clampRetention,
   getSettings,
@@ -61,6 +63,27 @@ describe('getSettings', () => {
     }
     mockState.values = { [SETTING_KEYS.initializedBackupRoots]: '["/a", 3, "/b"]' };
     expect((await getSettings()).initializedBackupRoots).toEqual(['/a', '/b']);
+  });
+
+  it('matches backup roots regardless of spelling', () => {
+    expect(isKnownBackupRoot('/mnt/usb//joplin/', ['/mnt/usb/joplin'], 'linux')).toBe(true);
+    expect(isKnownBackupRoot('/mnt/usb/./joplin', ['/mnt/usb/joplin'], 'linux')).toBe(true);
+    expect(isKnownBackupRoot('/mnt/usb/Joplin', ['/mnt/usb/joplin'], 'linux')).toBe(false);
+    expect(isKnownBackupRoot('e:/backups', ['E:\\Backups'], 'win32')).toBe(true);
+    expect(isKnownBackupRoot('E:\\Backups\\', ['E:\\Backups'], 'win32')).toBe(true);
+    expect(isKnownBackupRoot('F:\\Backups', ['E:\\Backups'], 'win32')).toBe(false);
+  });
+
+  it('records a new initialized root once, in resolved form', async () => {
+    mockState.values = { [SETTING_KEYS.initializedBackupRoots]: '["/mnt/usb/joplin"]' };
+    await addInitializedBackupRoot('/mnt/usb//joplin');
+    expect(mockState.setValues).toEqual([]);
+
+    await addInitializedBackupRoot('/mnt/other/./joplin');
+    expect(JSON.parse(String(mockState.values[SETTING_KEYS.initializedBackupRoots]))).toEqual([
+      '/mnt/usb/joplin',
+      '/mnt/other/joplin',
+    ]);
   });
 
   it('returns an empty backupPath instead of throwing when unset', async () => {
