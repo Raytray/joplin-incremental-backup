@@ -9,9 +9,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
+import joplin from '../src/__mocks__/joplin';
+import { digestPairs } from '../src/backup';
 import {
   ACTIVE_DIR_PREFIX,
   createStagingDirName,
+  describeWarnings,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -33,7 +36,7 @@ import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
-import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
+import { MISSING_BACKUP_PATH_MESSAGE, SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
 const PROFILE = 'default';
@@ -73,14 +76,21 @@ function stubExport(files: Array<{ path: string; content: string }>): void {
 
 function setData(options: {
   notes?: Array<{ id: string; updated_time: number }>;
-  folders?: Array<{ id: string }>;
-  resources?: Array<{ updated_time: number }>;
+  folders?: Array<{ id: string; updated_time?: number }>;
+  resources?: Array<{ id: string; updated_time: number }>;
+  tags?: Array<{ id: string; updated_time?: number }>;
+  /** Tag id → ids of the notes carrying that tag. */
+  noteTags?: Record<string, string[]>;
 }): void {
   mockState.dataItems = {
     notes: options.notes ?? [],
     folders: options.folders ?? [{ id: 'folder-1' }],
     resources: options.resources ?? [],
+    tags: options.tags ?? [],
   };
+  for (const [tagId, noteIds] of Object.entries(options.noteTags ?? {})) {
+    mockState.dataItems[`tags/${tagId}/notes`] = noteIds.map((id) => ({ id }));
+  }
 }
 
 const FIXED_DATE = new Date('2026-01-02T03:04:05.000Z');
@@ -114,11 +124,47 @@ describe('pure helpers', () => {
   });
 
   it('compares fingerprints strictly, rejecting missing ones', () => {
-    const a = { maxNoteUpdatedTime: 1, noteCount: 2, maxResourceUpdatedTime: 3 };
+    const a = {
+      maxNoteUpdatedTime: 1,
+      noteCount: 2,
+      maxResourceUpdatedTime: 3,
+      noteDigest: 'n',
+      resourceDigest: 'r',
+      folderDigest: 'f',
+      tagDigest: 't',
+      noteTagDigest: 'nt',
+    };
     expect(fingerprintsEqual(a, { ...a })).toBe(true);
     expect(fingerprintsEqual(a, { ...a, noteCount: 3 })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, folderDigest: 'f2' })).toBe(false);
+    expect(fingerprintsEqual(a, { ...a, noteTagDigest: undefined })).toBe(false);
     expect(fingerprintsEqual(a, undefined)).toBe(false);
     expect(fingerprintsEqual(undefined, a)).toBe(false);
+  });
+
+  it('treats a legacy fingerprint (missing digests) as different', () => {
+    const legacy = { maxNoteUpdatedTime: 1, noteCount: 2, maxResourceUpdatedTime: 3 };
+    expect(fingerprintsEqual(legacy, { ...legacy })).toBe(false);
+  });
+
+  it('digestPairs is order-independent and sensitive to every pair', () => {
+    const base = digestPairs([
+      ['a', '1'],
+      ['b', '2'],
+    ]);
+    expect(
+      digestPairs([
+        ['b', '2'],
+        ['a', '1'],
+      ]),
+    ).toBe(base);
+    expect(
+      digestPairs([
+        ['a', '1'],
+        ['b', '3'],
+      ]),
+    ).not.toBe(base);
+    expect(digestPairs([['a', '1']])).not.toBe(base);
   });
 
   it('detects transient export errors', () => {
@@ -195,21 +241,137 @@ describe('recoverBackupDirs', () => {
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).resolves.toBeDefined();
   });
 });
+describe('unset backup directory', () => {
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.backupPath]: '' });
+  });
+
+  it('runBackup fails with a user-facing error and exports nothing', async () => {
+    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+    expect(mockState.executedCommands).toHaveLength(0);
+  });
+
+  it('verifyBackup fails with a user-facing error', async () => {
+    await expect(verifyBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+  });
+
+  it('recoverBackupDirs is a quiet no-op', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    await expect(recoverBackupDirs()).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('records the failure so "Show last backup result" and a toast report it', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(
+      /failed — .*No backup directory is set/,
+    );
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
+  });
+});
+
+describe('relative backup directory', () => {
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.backupPath]: 'relative/backups' });
+  });
+
+  it('runBackup refuses it and creates nothing in the working directory', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup()).rejects.toThrow(/not an absolute path/);
+    expect(mockState.executedCommands).toHaveLength(0);
+    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('recoverBackupDirs leaves it alone', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    await recoverBackupDirs();
+    expect(warn).not.toHaveBeenCalled();
+    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
+    warn.mockRestore();
+  });
+});
+
+describe('runBackup — setup failures', () => {
+  it('records a disk-space failure before the lock is taken', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(run({ minFreeBytes: Number.MAX_SAFE_INTEGER })).rejects.toThrow(
+      /Not enough free disk space/,
+    );
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/failed/);
+  });
+
+  it('does not record lock contention as a failure of the running backup', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    await fs.writeFile(path.join(root, LOCK_FILENAME), new Date().toISOString());
+
+    await expect(run()).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBeUndefined();
+  });
+});
+
 describe('getChangeFingerprint', () => {
-  it('collects max note time, note count, and max resource time', async () => {
+  it('collects note, resource, notebook and tag counts and times', async () => {
     setData({
       notes: [
         { id: 'n1', updated_time: 100 },
         { id: 'n2', updated_time: 500 },
       ],
-      resources: [{ updated_time: 42 }, { updated_time: 900 }],
+      resources: [
+        { id: 'r1', updated_time: 42 },
+        { id: 'r2', updated_time: 900 },
+      ],
+      folders: [
+        { id: 'f1', updated_time: 7 },
+        { id: 'f2', updated_time: 70 },
+      ],
+      tags: [{ id: 't1', updated_time: 33 }],
+      noteTags: { t1: ['n1'] },
     });
 
-    await expect(getChangeFingerprint()).resolves.toEqual({
+    const fingerprint = await getChangeFingerprint();
+    expect(fingerprint).toEqual({
       maxNoteUpdatedTime: 500,
       noteCount: 2,
       maxResourceUpdatedTime: 900,
+      noteDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      resourceDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      folderDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      tagDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      noteTagDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
+  });
+
+  it('leaves out note-tag links (and their queries) when asked to', async () => {
+    setData({ tags: [{ id: 't1' }], noteTags: { t1: ['n1'] } });
+    const get = vi.spyOn(joplin.data, 'get');
+    try {
+      const fingerprint = await getChangeFingerprint({ includeNoteTags: false });
+      expect(fingerprint.noteTagDigest).toBeUndefined();
+      expect(get.mock.calls.some(([dataPath]) => (dataPath as string[]).length > 1)).toBe(false);
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it('produces an order-independent note-tag digest', async () => {
+    setData({
+      tags: [{ id: 't1' }, { id: 't2' }],
+      noteTags: { t1: ['n1', 'n2'], t2: ['n3'] },
+    });
+    const a = await getChangeFingerprint();
+
+    setData({
+      tags: [{ id: 't2' }, { id: 't1' }],
+      noteTags: { t1: ['n2', 'n1'], t2: ['n3'] },
+    });
+    const b = await getChangeFingerprint();
+
+    expect(a.noteTagDigest).toBe(b.noteTagDigest);
   });
 
   it('paginates across multiple pages', async () => {
@@ -380,14 +542,204 @@ describe('runBackup — onlyOnChange', () => {
   });
 
   it('takes a new snapshot when a resource changes', async () => {
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 10 }] });
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 10 }],
+    });
     await run();
 
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], resources: [{ updated_time: 999 }] });
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 999 }],
+    });
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
 
     expect(second.status).toBe('success');
     expect(second.snapshotName).toBe('20260102T040000');
+  });
+
+  it('takes a new snapshot when a resource is deleted', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [
+        { id: 'r1', updated_time: 10 },
+        { id: 'r2', updated_time: 5 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      resources: [{ id: 'r1', updated_time: 10 }],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook is renamed', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 2 }],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook is added', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 1 },
+        { id: 'f2', updated_time: 1 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a tag is renamed', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], tags: [{ id: 't1', updated_time: 1 }] });
+    await run();
+
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], tags: [{ id: 't1', updated_time: 2 }] });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a note is tagged without other timestamps changing', async () => {
+    const base = {
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      tags: [{ id: 't1', updated_time: 1 }],
+    };
+    setData({ ...base, noteTags: { t1: [] } });
+    await run();
+
+    setData({ ...base, noteTags: { t1: ['n1'] } });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('skips when notebooks, tags and links are all unchanged', async () => {
+    const data = {
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [{ id: 'f1', updated_time: 1 }],
+      tags: [{ id: 't1', updated_time: 1 }],
+      noteTags: { t1: ['n1'] },
+    };
+    setData(data);
+    await run();
+
+    setData(data);
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('skipped');
+  });
+
+  it('takes one new snapshot when the stored fingerprint predates the newer fields', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const first = await run();
+    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+
+    const manifest = (await readManifest(snapshotDir))!;
+    const { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime } = manifest.changeFingerprint;
+    await fs.writeFile(
+      path.join(snapshotDir, MANIFEST_FILENAME),
+      JSON.stringify({
+        ...manifest,
+        changeFingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+      }),
+    );
+
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+    expect(second.status).toBe('success');
+
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const third = await run({ now: new Date('2026-01-02T05:00:00.000Z') });
+    expect(third.status).toBe('skipped');
+  });
+
+  it('takes a new snapshot when a synced edit arrives with an older timestamp', async () => {
+    // n2 is the newest local edit; n1 was edited elsewhere earlier and syncs
+    // in afterwards. Max time and count are unchanged, so only the digest
+    // can notice.
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 100 },
+        { id: 'n2', updated_time: 500 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 300 },
+        { id: 'n2', updated_time: 500 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when a notebook rename syncs in with an older timestamp', async () => {
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 1 },
+        { id: 'f2', updated_time: 50 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [{ id: 'n1', updated_time: 1000 }],
+      folders: [
+        { id: 'f1', updated_time: 20 },
+        { id: 'f2', updated_time: 50 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
+  });
+
+  it('takes a new snapshot when one note is deleted and an older one imported', async () => {
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 1000 },
+        { id: 'n2', updated_time: 10 },
+      ],
+    });
+    await run();
+
+    setData({
+      notes: [
+        { id: 'n1', updated_time: 1000 },
+        { id: 'n3', updated_time: 5 },
+      ],
+    });
+    const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+    expect(second.status).toBe('success');
   });
 
   it('always snapshots when the stored manifest has no fingerprint', async () => {
@@ -402,6 +754,102 @@ describe('runBackup — onlyOnChange', () => {
     stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
+  });
+});
+
+describe('describeWarnings', () => {
+  it('is empty when there are no warnings', () => {
+    expect(describeWarnings([])).toBe('');
+  });
+
+  it('counts only exporter warnings as skipped items', () => {
+    const text = describeWarnings([
+      { kind: 'export', message: 'a' },
+      { kind: 'export', message: 'b' },
+    ]);
+    expect(text).toMatch(/2 item\(s\) were skipped by the export/);
+    expect(text).toMatch(/may be incomplete/);
+  });
+
+  it('lists the count and kind of each completeness warning', () => {
+    const text = describeWarnings([
+      { kind: 'completeness', message: 'long note text', summary: '3 note(s)' },
+      { kind: 'completeness', message: 'long resource text', summary: '40 of 200 resource(s)' },
+    ]);
+    expect(text).not.toMatch(/skipped by the export/);
+    expect(text).toMatch(/Missing from the export: 3 note\(s\), 40 of 200 resource\(s\)\./);
+    expect(text).toMatch(/may be incomplete/);
+  });
+
+  it('mentions storage warnings without calling the snapshot incomplete', () => {
+    const text = describeWarnings([{ kind: 'storage', message: 'no hardlinks' }]);
+    expect(text).toMatch(/Deduplication was limited/);
+    expect(text).toMatch(/1 warning\(s\)/);
+    expect(text).not.toMatch(/may be incomplete/);
+  });
+});
+
+describe('runBackup — success bookkeeping', () => {
+  it('reports the hardlink fallback as a warning without calling the snapshot incomplete', async () => {
+    await run();
+
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+    try {
+      stubExport([{ path: 'n1.md', content: 'hello' }]);
+      setData({ notes: [{ id: 'n1', updated_time: 2000 }], folders: [] });
+      const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+      expect(second.status).toBe('success');
+      expect(second.warnings).toEqual([expect.stringMatching(/Hardlinks are not supported/)]);
+      expect(second.message).not.toMatch(/skipped by the export/);
+      expect(second.message).not.toMatch(/may be incomplete/);
+      expect(second.message).toMatch(/Deduplication was limited/);
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  it('reports per-file dedup failures as a storage warning', async () => {
+    await run();
+
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('i/o error'), { code: 'EIO' }));
+    try {
+      stubExport([{ path: 'n1.md', content: 'hello' }]);
+      setData({ notes: [{ id: 'n1', updated_time: 2000 }], folders: [] });
+      const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+      expect(second.status).toBe('success');
+      expect(second.warnings).toEqual([
+        expect.stringMatching(/1 file\(s\) could not be deduplicated/),
+      ]);
+      expect(second.message).toMatch(/Deduplication was limited/);
+      expect(second.message).not.toMatch(/may be incomplete/);
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  it('persists lastBackup/lastSnapshot and logs completion exactly once', async () => {
+    const info = vi.spyOn(logger, 'info');
+    try {
+      const result = await run();
+
+      const writes = (key: string) => mockState.setValues.filter((entry) => entry.key === key);
+      expect(writes(SETTING_KEYS.lastBackup)).toHaveLength(1);
+      expect(writes(SETTING_KEYS.lastSnapshot)).toEqual([
+        { key: SETTING_KEYS.lastSnapshot, value: result.snapshotName },
+      ]);
+      const completions = info.mock.calls.filter(
+        ([message]) => typeof message === 'string' && message.startsWith('Backup complete'),
+      );
+      expect(completions).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 });
 
@@ -581,5 +1029,44 @@ describe('verifyBackup', () => {
 describe('settings section', () => {
   it('uses the documented section name', () => {
     expect(SETTING_SECTION_NAME).toBe('incrementalBackup');
+  });
+});
+
+describe('runBackup — inventory and notebook list', () => {
+  it('retries a transient error while reading the vault inventory', async () => {
+    const get = vi.spyOn(joplin.data, 'get').mockRejectedValueOnce(new Error('database is locked'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await run();
+      expect(result.status).toBe('success');
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it('re-reads the notebook list before each export attempt', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], folders: [{ id: 'f-old' }] });
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const exportedWith: unknown[] = [];
+    let attempt = 0;
+    mockState.commandHandlers.exportFolders = async (ids, _format, target) => {
+      attempt += 1;
+      exportedWith.push(ids);
+      if (attempt === 1) {
+        // A notebook is created and another deleted while the first attempt runs.
+        mockState.dataItems.folders = [{ id: 'f-new' }];
+        throw new Error('database is locked');
+      }
+      const dir = String(target);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
+      await fs.writeFile(path.join(dir, 'f-new.md'), 'folder');
+    };
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(exportedWith).toEqual([['f-old'], ['f-new']]);
+    expect(result.warnings).toEqual([]);
   });
 });

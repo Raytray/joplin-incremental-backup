@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import { createHash } from 'crypto';
 import path from 'path';
 import type { Dirent } from 'fs';
 import joplin from 'api';
@@ -18,13 +19,14 @@ import {
   toManifestKey,
   touchLock,
 } from './platform';
-import { buildManifest, readManifest, writeManifest } from './manifest';
+import { buildManifest, FINGERPRINT_DIGEST_KEYS, readManifest, writeManifest } from './manifest';
 import type { ChangeFingerprint, DeduplicationMode, ManifestMeta } from './manifest';
 import { dedup, getDeduplicationMode } from './dedup';
 import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
   getSettings,
+  requireBackupPath,
   setLastBackup,
   setLastSnapshot,
   setLastBackupResult,
@@ -45,6 +47,8 @@ export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
 
 const PAGE_LIMIT = 100;
+/** Parallel `tags/:id/notes` queries while reading note↔tag links. */
+const TAG_QUERY_CONCURRENCY = 8;
 const VERIFY_CONCURRENCY = 8;
 const SNAPSHOT_COLLISION_SUFFIX_START = 2;
 /** Floor for the lock heartbeat interval, regardless of the stale threshold. */
@@ -55,6 +59,54 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/**
+ * What a warning affects:
+ * - `export`: an item the exporter itself reported as skipped.
+ * - `completeness`: items inferred missing from a database/export count mismatch.
+ * - `storage`: the snapshot is complete, but deduplication was limited, so it
+ *   uses more disk space than expected (e.g. no hardlink support).
+ */
+export type BackupWarningKind = 'export' | 'completeness' | 'storage';
+
+export interface BackupWarning {
+  kind: BackupWarningKind;
+  /** Full text, shown in the warnings list. */
+  message: string;
+  /** Short form for the result message (e.g. "3 note(s)"); defaults to `message`. */
+  summary?: string;
+}
+
+/**
+ * Summary sentences for the result message, derived from the tagged warnings
+ * so that every warning source is reflected without extra wiring.
+ */
+export function describeWarnings(warnings: readonly BackupWarning[]): string {
+  const ofKind = (kind: BackupWarningKind) => warnings.filter((w) => w.kind === kind);
+  const exported = ofKind('export');
+  const completeness = ofKind('completeness');
+  const storage = ofKind('storage');
+
+  const parts: string[] = [];
+  if (exported.length > 0) {
+    parts.push(`${exported.length} item(s) were skipped by the export.`);
+  }
+  if (completeness.length > 0) {
+    parts.push(
+      `Missing from the export: ${completeness.map((w) => w.summary ?? w.message).join(', ')}.`,
+    );
+  }
+  if (exported.length > 0 || completeness.length > 0) {
+    parts.push('The snapshot may be incomplete (see warnings).');
+  }
+  if (storage.length > 0) {
+    parts.push(
+      `Deduplication was limited, so this snapshot uses more disk space than expected ` +
+        `(${storage.length} warning(s), see warnings).`,
+    );
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
 }
 
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
@@ -93,6 +145,15 @@ export interface VaultInventory {
   noteIds: string[];
   /** Number of resources in the database. */
   resourceCount: number;
+}
+
+export interface VaultInventoryOptions {
+  /**
+   * Read note↔tag links (one query per tag) into `noteTagDigest`. Only the
+   * skip-on-unchanged check needs them, so callers that will export anyway
+   * can leave them out.
+   */
+  includeNoteTags?: boolean;
 }
 
 export interface CompletenessCheckInput {
@@ -178,6 +239,17 @@ export function resolveBackupRoot(backupPath: string, profileName?: string): str
   const base = backupPath.replace(/[/\\]+$/, '');
   if (!profileName || !profileName.trim()) return base;
   return path.join(base, profileName.trim());
+}
+
+/**
+ * The backup root for this run: the explicit override (tests), otherwise the
+ * configured directory. Throws a user-facing error when the directory is unset
+ * or not absolute, so a bad setting can never resolve to a path in the
+ * working directory. This is the only place that decision is made.
+ */
+function configuredBackupRoot(settings: Settings, options: BackupOptions): string {
+  if (options.backupRoot !== undefined) return options.backupRoot;
+  return resolveBackupRoot(requireBackupPath(settings), options.profileName);
 }
 
 export function activeDirPath(backupRoot: string, runName?: string): string {
@@ -282,33 +354,41 @@ export async function resolveLastSnapshot(
   return snapshots.length > 0 ? snapshots[snapshots.length - 1] : null;
 }
 
+const FINGERPRINT_KEYS: ReadonlyArray<keyof ChangeFingerprint> = [
+  'maxNoteUpdatedTime',
+  'noteCount',
+  'maxResourceUpdatedTime',
+  ...FINGERPRINT_DIGEST_KEYS,
+];
+
+/**
+ * True only when every fingerprint field matches. A field missing on one side
+ * (a manifest written by an older version) counts as a difference.
+ */
 export function fingerprintsEqual(
   a: ChangeFingerprint | null | undefined,
   b: ChangeFingerprint | null | undefined,
 ): boolean {
   if (!a || !b) return false;
-  return (
-    a.maxNoteUpdatedTime === b.maxNoteUpdatedTime &&
-    a.noteCount === b.noteCount &&
-    a.maxResourceUpdatedTime === b.maxResourceUpdatedTime
-  );
+  return FINGERPRINT_KEYS.every((key) => a[key] !== undefined && a[key] === b[key]);
 }
 
 async function paginate(
-  resource: string,
+  resource: string | string[],
   fields: string[],
   onItem: (item: Record<string, unknown>) => void,
 ): Promise<void> {
+  const dataPath = Array.isArray(resource) ? resource : [resource];
   let page = 1;
   for (;;) {
-    const response = await joplin.data.get([resource], { fields, page, limit: PAGE_LIMIT });
+    const response = await joplin.data.get(dataPath, { fields, page, limit: PAGE_LIMIT });
     const items: Array<Record<string, unknown>> = Array.isArray(response?.items)
       ? response.items
       : [];
 
     if (page === 1) {
       logger.debug(
-        `joplin.data.get("${resource}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
+        `joplin.data.get("${dataPath.join('/')}") returned page size ${items.length} (requested ${PAGE_LIMIT})`,
       );
     }
 
@@ -319,40 +399,94 @@ async function paginate(
   }
 }
 
-export async function getChangeFingerprint(): Promise<ChangeFingerprint> {
-  return (await collectVaultInventory()).fingerprint;
+export async function getChangeFingerprint(
+  options?: VaultInventoryOptions,
+): Promise<ChangeFingerprint> {
+  return (await collectVaultInventory(options)).fingerprint;
 }
 
 /**
- * Read the vault inventory in a single pass over notes and resources.
- *
- * The notes query already asks for `id`, so collecting the ids costs nothing
- * extra and the completeness check can reuse them.
+ * SHA-256 over `key:value` pairs in sorted order, so the digest does not depend
+ * on the order the API returned them in. Pairs are fed to the hash one at a
+ * time rather than joined into a single string first.
  */
-export async function collectVaultInventory(): Promise<VaultInventory> {
-  let maxNoteUpdatedTime = 0;
-  let noteCount = 0;
-  let maxResourceUpdatedTime = 0;
-  let resourceCount = 0;
+export function digestPairs(pairs: Array<readonly [string, string]>): string {
+  const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  pairs.sort((a, b) => compare(a[0], b[0]) || compare(a[1], b[1]));
+  const hash = createHash('sha256');
+  for (const [key, value] of pairs) hash.update(`${key}:${value}\n`);
+  return hash.digest('hex');
+}
+
+/**
+ * Read every `id:updated_time` pair of one item type, tracking the newest
+ * `updated_time` along the way.
+ */
+async function readItemTimes(
+  resource: string,
+  onId?: (id: string) => void,
+): Promise<{ pairs: Array<[string, string]>; maxUpdatedTime: number }> {
+  const pairs: Array<[string, string]> = [];
+  let maxUpdatedTime = 0;
+  await paginate(resource, ['id', 'updated_time'], (item) => {
+    const updated = Number(item.updated_time) || 0;
+    if (updated > maxUpdatedTime) maxUpdatedTime = updated;
+    if (typeof item.id !== 'string') return;
+    pairs.push([item.id, String(updated)]);
+    onId?.(item.id);
+  });
+  return { pairs, maxUpdatedTime };
+}
+
+/**
+ * Read the vault inventory: notes, resources, notebooks and tags, plus (when
+ * requested) the note↔tag links.
+ *
+ * Each item type is reduced to a digest of its sorted `id:updated_time`
+ * pairs, so any added, removed or changed item alters the fingerprint, even
+ * one that arrives through sync with an older timestamp than the newest
+ * local edit.
+ *
+ * Note↔tag links have no endpoint of their own, so they are read per tag
+ * (`tags/:id/notes`), with bounded concurrency.
+ */
+export async function collectVaultInventory(
+  options: VaultInventoryOptions = {},
+): Promise<VaultInventory> {
+  const { includeNoteTags = true } = options;
   const noteIds: string[] = [];
 
-  await paginate('notes', ['id', 'updated_time'], (note) => {
-    noteCount += 1;
-    if (typeof note.id === 'string') noteIds.push(note.id);
-    const updated = Number(note.updated_time) || 0;
-    if (updated > maxNoteUpdatedTime) maxNoteUpdatedTime = updated;
-  });
+  const notes = await readItemTimes('notes', (id) => noteIds.push(id));
+  const resources = await readItemTimes('resources');
+  const folders = await readItemTimes('folders');
+  const tags = await readItemTimes('tags');
 
-  await paginate('resources', ['updated_time'], (resource) => {
-    resourceCount += 1;
-    const updated = Number(resource.updated_time) || 0;
-    if (updated > maxResourceUpdatedTime) maxResourceUpdatedTime = updated;
-  });
+  let noteTagDigest: string | undefined;
+  if (includeNoteTags) {
+    const tagIds = tags.pairs.map(([id]) => id);
+    const perTag = await mapWithConcurrency(tagIds, TAG_QUERY_CONCURRENCY, async (tagId) => {
+      const links: Array<[string, string]> = [];
+      await paginate(['tags', tagId, 'notes'], ['id'], (note) => {
+        if (typeof note.id === 'string') links.push([tagId, note.id]);
+      });
+      return links;
+    });
+    noteTagDigest = digestPairs(perTag.flat());
+  }
 
   return {
-    fingerprint: { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime },
+    fingerprint: {
+      maxNoteUpdatedTime: notes.maxUpdatedTime,
+      noteCount: notes.pairs.length,
+      maxResourceUpdatedTime: resources.maxUpdatedTime,
+      noteDigest: digestPairs(notes.pairs),
+      resourceDigest: digestPairs(resources.pairs),
+      folderDigest: digestPairs(folders.pairs),
+      tagDigest: digestPairs(tags.pairs),
+      noteTagDigest,
+    },
     noteIds,
-    resourceCount,
+    resourceCount: resources.pairs.length,
   };
 }
 
@@ -379,34 +513,43 @@ export async function getAllFolderIds(): Promise<string[]> {
  * Tags and note-tags are not checked — verifying them needs extra scans that
  * cost more than they are worth.
  */
-export function checkExportCompleteness(input: CompletenessCheckInput): string[] {
+export function checkExportCompleteness(input: CompletenessCheckInput): BackupWarning[] {
   const { exportedFiles, inventory, folderIds } = input;
   const exported = new Set(exportedFiles);
-  const warnings: string[] = [];
+  const warnings: BackupWarning[] = [];
 
   const missingNotes = inventory.noteIds.filter((id) => !exported.has(`${id}.md`));
   if (missingNotes.length > 0) {
-    warnings.push(
-      `${missingNotes.length} note(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingNotes.length} note(s) are missing from the export ` +
         `(e.g. ${missingNotes.slice(0, 3).join(', ')}); they may still be encrypted.`,
-    );
+      summary: `${missingNotes.length} note(s)`,
+    });
   }
 
   const missingFolders = folderIds.filter((id) => !exported.has(`${id}.md`));
   if (missingFolders.length > 0) {
-    warnings.push(
-      `${missingFolders.length} notebook(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingFolders.length} notebook(s) are missing from the export ` +
         `(e.g. ${missingFolders.slice(0, 3).join(', ')}).`,
-    );
+      summary: `${missingFolders.length} notebook(s)`,
+    });
   }
 
   const resourcePrefix = `${RESOURCES_DIR_NAME}/`;
   const exportedResources = exportedFiles.filter((file) => file.startsWith(resourcePrefix)).length;
   if (exportedResources < inventory.resourceCount) {
-    warnings.push(
-      `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
         'some attachments may be missing.',
-    );
+      summary: `${inventory.resourceCount - exportedResources} of ${inventory.resourceCount} resource(s)`,
+    });
   }
 
   return warnings;
@@ -491,8 +634,7 @@ function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () =
 
 async function resolveContext(options: BackupOptions): Promise<ResolvedContext> {
   const settings = await getSettings();
-  const backupRoot =
-    options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+  const backupRoot = configuredBackupRoot(settings, options);
 
   return {
     settings,
@@ -510,19 +652,58 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
 // Backup
 // ---------------------------------------------------------------------------
 
-export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
-  const context = await resolveContext(options);
-  const { settings, backupRoot, lockPath, activeDir } = context;
+/**
+ * Log, toast and persist a failed run so "Show last backup result" reflects
+ * it. Persistence errors are swallowed: they must never mask the original.
+ */
+async function recordFailure(startTime: number, error: unknown): Promise<void> {
+  const durationMs = Date.now() - startTime;
+  const duration = `${(durationMs / 1000).toFixed(1)}s`;
+  const message = error instanceof Error ? error.message : String(error);
+  logger.error('Backup failed.', error);
+  void joplin.views.dialogs
+    .showToast({
+      message: `Backup failed after ${duration}.`,
+      type: ToastType.Error,
+      duration: 6000,
+    })
+    .catch(() => undefined);
+  try {
+    const record = JSON.stringify({
+      status: 'failed',
+      startedAt: new Date(startTime).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      error: message,
+    });
+    await setLastBackupResult(`${new Date().toISOString()} — failed — ${duration} — ${message}`);
+    await setLastBackupResultJson(record);
+  } catch {
+    // Persistence must never mask the original error.
+  }
+}
 
-  await ensureBackupRoot(backupRoot);
-  // Gate before locking: never commit to a run (or leave a lock behind) when
-  // there is provably not enough space.
-  await assertDiskSpace(backupRoot, context.minFreeBytes);
+export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
+  const startTime = Date.now();
+
+  let context: ResolvedContext;
+  try {
+    context = await resolveContext(options);
+    await ensureBackupRoot(context.backupRoot);
+    // Gate before locking: never commit to a run (or leave a lock behind) when
+    // there is provably not enough space.
+    await assertDiskSpace(context.backupRoot, context.minFreeBytes);
+  } catch (error) {
+    // Setup failures (no/invalid directory, low disk space) are recorded like
+    // any other failed run. Lock contention below is not: it means another
+    // run is in progress and will record its own result.
+    await recordFailure(startTime, error);
+    throw error;
+  }
+  const { settings, backupRoot, lockPath, activeDir } = context;
 
   await acquireLock(lockPath, context.staleLockMs);
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
-
-  const startTime = Date.now();
 
   try {
     logger.info('Starting backup run...');
@@ -538,7 +719,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const lastManifest = lastSnapshotDir ? await readManifest(lastSnapshotDir) : null;
 
     logger.info('Scanning vault for changes...');
-    const inventory = await collectVaultInventory();
+    // Reading the inventory is many Data API calls; retry the same transient
+    // errors (e.g. "database is locked" during sync) that the export retries.
+    const inventory = await retryTransient(
+      () => collectVaultInventory({ includeNoteTags: settings.onlyOnChange }),
+      context.exportRetries,
+    );
     const currentFingerprint = inventory.fingerprint;
 
     if (
@@ -583,9 +769,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       return result;
     }
 
-    const folderIds = await getAllFolderIds();
-    logger.info(`Exporting ${folderIds.length} notebook(s)...`);
+    let folderIds: string[] = [];
     const exportResult = await retryTransient(async () => {
+      // Read the notebook list right before each attempt so a notebook created
+      // or deleted during the inventory scan (or between retries) is not
+      // missed or passed to the exporter after it is gone.
+      folderIds = await getAllFolderIds();
+      logger.info(`Exporting ${folderIds.length} notebook(s)...`);
       // Each attempt starts from an empty directory so a partial export from
       // a failed attempt can never end up in the snapshot.
       await safeRmDir(activeDir);
@@ -623,9 +813,15 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       folderIds,
     });
     if (completenessWarnings.length > 0) {
-      logger.warn('The export looks incomplete:', completenessWarnings);
+      logger.warn(
+        'The export looks incomplete:',
+        completenessWarnings.map((w) => w.message),
+      );
     }
-    const warnings = [...exportWarnings, ...completenessWarnings];
+    const warnings: BackupWarning[] = [
+      ...exportWarnings.map((message): BackupWarning => ({ kind: 'export', message })),
+      ...completenessWarnings,
+    ];
 
     logger.info('Deduplicating against previous snapshot...');
     const dedupResult: DedupResult = await dedup(
@@ -680,27 +876,33 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
 
-    const nowIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(nowIso);
+    // Persist the committed snapshot immediately so settings never lag behind
+    // what is on disk, even if later result/message building throws.
+    const finishedIso = (options.now ?? new Date()).toISOString();
+    await setLastBackup(finishedIso);
     await setLastSnapshot(snapshotName);
 
     // Warn if hardlinks are unsupported — the user may not realize each snapshot
     // consumes full vault size when the filesystem falls back to copies.
     if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
-      warnings.push(
-        'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
-      );
+      warnings.push({
+        kind: 'storage',
+        message:
+          'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+      });
     }
+    if (dedupResult.failed > 0) {
+      warnings.push({
+        kind: 'storage',
+        message:
+          `${dedupResult.failed} file(s) could not be deduplicated against the previous snapshot; ` +
+          'full copies were kept instead (see the log for details).',
+      });
+    }
+    const warningMessages = warnings.map((w) => w.message);
 
     const durationMs = Date.now() - startTime;
     const elapsed = (durationMs / 1000).toFixed(1);
-    logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
-        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
-        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
-        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
-    );
-
     const duration = `${elapsed}s`;
     const result: BackupResult = {
       status: 'success',
@@ -711,7 +913,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       hardlinked: dedupResult.hardlinked,
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
-      warnings,
+      warnings: warningMessages,
       durationMs,
       duration,
       changes,
@@ -720,11 +922,33 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
           ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
           : ' No file changes.') +
-        (warnings.length > 0
-          ? ` ${warnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
-          : ''),
+        describeWarnings(warnings),
     };
 
+    const record = JSON.stringify({
+      status: 'success',
+      startedAt: new Date(startTime).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      snapshotName,
+      fileCount: manifest.fileCount,
+      changes,
+      warnings: warningMessages,
+      message: result.message,
+    });
+    await setLastBackupResult(
+      `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
+        `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
+    );
+    await setLastBackupResultJson(record);
+
+    // Only announce completion once everything has been persisted.
+    logger.info(
+      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
+        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
+        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
+        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
+    );
     void joplin.views.dialogs
       .showToast({
         message:
@@ -735,60 +959,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       })
       .catch(() => undefined);
 
-    const record = JSON.stringify({
-      status: 'success',
-      startedAt: new Date(startTime).toISOString(),
-      finishedAt: new Date().toISOString(),
-      durationMs,
-      snapshotName,
-      fileCount: manifest.fileCount,
-      changes,
-      warnings,
-      message: result.message,
-    });
-    const finishedIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(finishedIso);
-    await setLastSnapshot(snapshotName);
-    await setLastBackupResult(
-      `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
-        `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
-    );
-    await setLastBackupResultJson(record);
-
-    logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
-        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
-        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
-        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
-    );
-
     return result;
   } catch (error) {
-    const durationMs = Date.now() - startTime;
-    const duration = `${(durationMs / 1000).toFixed(1)}s`;
-    logger.error('Backup failed.', error);
-    void joplin.views.dialogs
-      .showToast({
-        message: `Backup failed after ${duration}.`,
-        type: ToastType.Error,
-        duration: 6000,
-      })
-      .catch(() => undefined);
-    try {
-      const record = JSON.stringify({
-        status: 'failed',
-        startedAt: new Date(startTime).toISOString(),
-        finishedAt: new Date().toISOString(),
-        durationMs,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await setLastBackupResult(
-        `${new Date().toISOString()} — failed — ${duration} — ${error instanceof Error ? error.message : String(error)}`,
-      );
-      await setLastBackupResultJson(record);
-    } catch {
-      // Persistence must never mask the original error.
-    }
+    await recordFailure(startTime, error);
     throw error;
   } finally {
     heartbeat.stop();
@@ -811,8 +984,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
 export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyResult> {
   const settings = await getSettings();
-  const backupRoot =
-    options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+  const backupRoot = configuredBackupRoot(settings, options);
   const computeHash = options.computeHash ?? computeFileSha256;
 
   const snapshotName = await resolveLastSnapshot(backupRoot, settings.lastSnapshot || undefined);
@@ -891,8 +1063,14 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 export async function recoverBackupDirs(options: BackupOptions = {}): Promise<void> {
   try {
     const settings = await getSettings();
-    const backupRoot =
-      options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+    let backupRoot: string;
+    try {
+      backupRoot = configuredBackupRoot(settings, options);
+    } catch (error) {
+      // No usable directory configured: nothing to recover, and not worth a warning.
+      logger.info(`Skipping backup directory recovery: ${(error as Error).message}`);
+      return;
+    }
     await ensureBackupRoot(backupRoot);
 
     const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;

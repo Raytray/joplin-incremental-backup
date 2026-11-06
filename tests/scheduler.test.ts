@@ -34,9 +34,9 @@ function successResult(): BackupResult {
   return { status: 'success', message: 'ok' };
 }
 
-function makeSettings(backupInterval: number, lastBackup = ''): Settings {
+function makeSettings(backupInterval: number, lastBackup = '', backupPath = BACKUP_ROOT): Settings {
   return {
-    backupPath: BACKUP_ROOT,
+    backupPath,
     backupRetention: 5,
     backupInterval,
     onlyOnChange: true,
@@ -433,6 +433,218 @@ describe('Scheduler.init and settings changes', () => {
     await scheduler.handleSettingsChange([SETTING_KEYS.onlyOnChange]);
 
     expect(manual.timers).toHaveLength(1);
+  });
+});
+
+describe('Scheduler without a backup directory', () => {
+  it('does not arm a timer at startup when no backup directory is set', async () => {
+    const manual = createManualTimers();
+    const runBackup = vi.fn(async () => successResult());
+    const scheduler = createScheduler({
+      runBackup,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', ''),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+
+    expect(scheduler.isRunning()).toBe(false);
+    expect(manual.timers).toHaveLength(0);
+    expect(runBackup).not.toHaveBeenCalled();
+  });
+
+  it('starts once a backup directory is set', async () => {
+    const manual = createManualTimers();
+    let backupPath = '';
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    expect(scheduler.isRunning()).toBe(false);
+
+    backupPath = BACKUP_ROOT;
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(scheduler.isRunning()).toBe(true);
+    expect(manual.timers[0].timeout).toBe(CATCH_UP_GRACE_MS);
+  });
+
+  it('stops when the backup directory is cleared', async () => {
+    const manual = createManualTimers();
+    let backupPath = BACKUP_ROOT;
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    expect(scheduler.isRunning()).toBe(true);
+
+    backupPath = '';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(scheduler.isRunning()).toBe(false);
+    expect(manual.timers[0].cleared).toBe(true);
+  });
+});
+
+describe('Scheduler — settings change while a backup is running', () => {
+  /** A runBackup whose completion the test controls. */
+  function controlledRun() {
+    let finish: (result: BackupResult) => void = () => undefined;
+    const runBackup = vi.fn(
+      () =>
+        new Promise<BackupResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    return { runBackup, finish: (result = successResult()) => finish(result) };
+  }
+
+  /** Let the finished backup's continuation (and the tick after it) run. */
+  const flushEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  const live = (timers: Array<{ cleared: boolean; fired: boolean }>) =>
+    timers.filter((timer) => !timer.cleared && !timer.fired);
+
+  it('stays paused when the directory is cleared mid-backup', async () => {
+    const manual = createManualTimers();
+    const backup = controlledRun();
+    let backupPath = BACKUP_ROOT;
+    const scheduler = createScheduler({
+      runBackup: backup.runBackup,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    manual.fireAll(); // startup catch-up begins; the backup is now in flight
+    expect(backup.runBackup).toHaveBeenCalledTimes(1);
+
+    backupPath = '';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+    backup.finish();
+    await flushEventLoop();
+
+    expect(scheduler.isRunning()).toBe(false);
+    expect(live(manual.timers)).toHaveLength(0);
+  });
+
+  it('keeps a single live timer when the interval changes mid-backup', async () => {
+    const manual = createManualTimers();
+    const backup = controlledRun();
+    let interval = 24;
+    const scheduler = createScheduler({
+      runBackup: backup.runBackup,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(interval),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    manual.fireAll();
+
+    interval = 6;
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupInterval]);
+    const armedBySettings = manual.last();
+    backup.finish();
+    await flushEventLoop();
+
+    expect(live(manual.timers)).toEqual([armedBySettings]);
+  });
+});
+
+describe('Scheduler — backup directory changes', () => {
+  const recent = () => new Date(NOW - 60 * 60 * 1000).toISOString();
+
+  it('backs up soon when switching to a directory with no snapshots', async () => {
+    const manual = createManualTimers();
+    let backupPath = '/old';
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, recent(), backupPath),
+      now: () => NOW,
+      hasSnapshots: async () => false,
+    });
+
+    await scheduler.init();
+    expect(manual.last()!.timeout).toBe(23 * HOUR_IN_MS);
+
+    backupPath = '/new';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(manual.last()!.timeout).toBe(CATCH_UP_GRACE_MS);
+  });
+
+  it('keeps the regular schedule when the new directory already has snapshots', async () => {
+    const manual = createManualTimers();
+    let backupPath = '/old';
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, recent(), backupPath),
+      now: () => NOW,
+      hasSnapshots: async () => true,
+    });
+
+    await scheduler.init();
+    backupPath = '/existing';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(manual.last()!.timeout).toBe(23 * HOUR_IN_MS);
+  });
+
+  it('detects snapshots on disk by default', async () => {
+    await fs.mkdir(path.join('/existing', '20260101T000000'), { recursive: true });
+    const manual = createManualTimers();
+    let backupPath = '/old';
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, recent(), backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    backupPath = '/existing';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+    expect(manual.last()!.timeout).toBe(23 * HOUR_IN_MS);
+
+    backupPath = '/empty';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+    expect(manual.last()!.timeout).toBe(CATCH_UP_GRACE_MS);
+  });
+
+  it('stays paused for a relative directory', async () => {
+    const manual = createManualTimers();
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', 'relative/backups'),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    expect(scheduler.isRunning()).toBe(false);
+    expect(manual.timers).toHaveLength(0);
   });
 });
 

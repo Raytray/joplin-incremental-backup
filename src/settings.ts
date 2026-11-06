@@ -1,3 +1,4 @@
+import path from 'path';
 import joplin from 'api';
 import { SettingItemSubType, SettingItemType } from 'api/types';
 import type { SettingItem, SettingSection } from 'api/types';
@@ -132,13 +133,43 @@ export function normalizeInterval(value: unknown): number {
   return Math.floor(parsed);
 }
 
+export const MISSING_BACKUP_PATH_MESSAGE =
+  'No backup directory is set. Choose one in Tools > Options > Incremental Backup.';
+
+function isAbsoluteFor(platform: NodeJS.Platform, backupPath: string): boolean {
+  return platform === 'win32'
+    ? path.win32.isAbsolute(backupPath)
+    : path.posix.isAbsolute(backupPath);
+}
+
+/**
+ * Why `backupPath` cannot be used as a backup directory, or `null` when it
+ * can. This is the single definition of a usable path: it must be set and
+ * absolute (a relative path would resolve against Joplin's working
+ * directory). Paths are expected to be trimmed already — `getSettings` does
+ * that — so surrounding whitespace counts as unusable here.
+ */
+export function backupPathProblem(
+  backupPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  if (!backupPath) return MISSING_BACKUP_PATH_MESSAGE;
+  if (backupPath !== backupPath.trim() || !isAbsoluteFor(platform, backupPath)) {
+    return (
+      `Backup directory "${backupPath}" is not an absolute path. ` +
+      'Choose a full path in Tools > Options > Incremental Backup.'
+    );
+  }
+  return null;
+}
+
+/** Throw a user-facing error when `backupPath` is unusable; warn on long Windows paths. */
 export function validateBackupPath(
   backupPath: string,
   platform: NodeJS.Platform = process.platform,
 ): void {
-  if (!backupPath || !backupPath.trim()) {
-    throw new Error('Backup path must not be empty.');
-  }
+  const problem = backupPathProblem(backupPath, platform);
+  if (problem) throw new Error(problem);
 
   if (platform === 'win32' && backupPath.length > WIN32_MAX_SAFE_PATH_LENGTH) {
     logger.warn(
@@ -147,12 +178,25 @@ export function validateBackupPath(
   }
 }
 
+/** True when a usable backup directory is configured. */
+export function hasBackupPath(settings: Pick<Settings, 'backupPath'>): boolean {
+  return backupPathProblem(settings.backupPath) === null;
+}
+
+/** Return the configured backup directory, or throw a user-facing error when it is unusable. */
+export function requireBackupPath(settings: Pick<Settings, 'backupPath'>): string {
+  validateBackupPath(settings.backupPath);
+  return settings.backupPath;
+}
+
 export async function getSettings(): Promise<Settings> {
   const values = await joplin.settings.values(Object.values(SETTING_KEYS));
 
   const rawBackupPath = values[SETTING_KEYS.backupPath];
+  // The only place the path is normalized. An unset or invalid path is a
+  // normal state (e.g. a fresh install), not an error here: callers that need
+  // a directory check it with `requireBackupPath`.
   const backupPath = typeof rawBackupPath === 'string' ? rawBackupPath.trim() : '';
-  validateBackupPath(backupPath);
 
   return {
     backupPath,

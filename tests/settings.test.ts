@@ -12,6 +12,10 @@ import {
   setLastBackup,
   setLastSnapshot,
   validateBackupPath,
+  backupPathProblem,
+  hasBackupPath,
+  requireBackupPath,
+  MISSING_BACKUP_PATH_MESSAGE,
 } from '../src/settings';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { logger } from '../src/logger';
@@ -47,9 +51,30 @@ describe('getSettings', () => {
     });
   });
 
-  it('throws when backupPath is empty', async () => {
+  it('returns an empty backupPath instead of throwing when unset', async () => {
     mockState.values = { [SETTING_KEYS.backupPath]: '   ' };
-    await expect(getSettings()).rejects.toThrow(/Backup path/);
+    const settings = await getSettings();
+    expect(settings.backupPath).toBe('');
+    expect(hasBackupPath(settings)).toBe(false);
+  });
+
+  it('requireBackupPath throws a user-facing error only when unusable', () => {
+    expect(() => requireBackupPath({ backupPath: '' })).toThrow(MISSING_BACKUP_PATH_MESSAGE);
+    expect(() => requireBackupPath({ backupPath: 'relative' })).toThrow(/not an absolute path/);
+    expect(requireBackupPath({ backupPath: '/tmp/backups' })).toBe('/tmp/backups');
+  });
+
+  it('returns a relative backupPath as-is (trimmed) instead of throwing', async () => {
+    mockState.values = { [SETTING_KEYS.backupPath]: '  backups  ' };
+    const settings = await getSettings();
+    expect(settings.backupPath).toBe('backups');
+    expect(hasBackupPath(settings)).toBe(false);
+  });
+
+  it('hasBackupPath and requireBackupPath agree on untrimmed input', () => {
+    const padded = { backupPath: '  /x  ' };
+    expect(hasBackupPath(padded)).toBe(false);
+    expect(() => requireBackupPath(padded)).toThrow();
   });
 
   it('clamps retention to at least 1 and defaults on invalid input', async () => {
@@ -83,9 +108,22 @@ describe('scheduler interval', () => {
 });
 
 describe('validateBackupPath', () => {
-  it('throws on empty paths', () => {
-    expect(() => validateBackupPath('', 'linux')).toThrow(/must not be empty/);
-    expect(() => validateBackupPath('   ', 'linux')).toThrow(/must not be empty/);
+  it('throws the missing-directory message on an empty path', () => {
+    expect(() => validateBackupPath('', 'linux')).toThrow(MISSING_BACKUP_PATH_MESSAGE);
+  });
+
+  it('rejects relative and untrimmed paths', () => {
+    expect(() => validateBackupPath('backups', 'linux')).toThrow(/not an absolute path/);
+    expect(() => validateBackupPath('./backups', 'linux')).toThrow(/not an absolute path/);
+    expect(() => validateBackupPath('C:backups', 'win32')).toThrow(/not an absolute path/);
+    expect(() => validateBackupPath('   ', 'linux')).toThrow(/not an absolute path/);
+    expect(() => validateBackupPath(' /x ', 'linux')).toThrow(/not an absolute path/);
+  });
+
+  it('accepts absolute paths for the platform', () => {
+    expect(backupPathProblem('/srv/backups', 'linux')).toBeNull();
+    expect(backupPathProblem('D:\\backups', 'win32')).toBeNull();
+    expect(backupPathProblem('\\\\server\\share\\backups', 'win32')).toBeNull();
   });
 
   it('warns on long Windows paths', () => {
