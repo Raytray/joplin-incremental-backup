@@ -33,6 +33,12 @@ jobs:
       - name: Format Check
         run: npm run format:check
 
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Build plugin
+        run: npm run dist
+
       - name: Run tests with coverage
         run: npm run test:coverage
 
