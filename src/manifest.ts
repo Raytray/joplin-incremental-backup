@@ -3,7 +3,6 @@ import path from 'path';
 import {
   atomicWriteFile,
   collectEntries,
-  collectFilesRecursive,
   computeFileSha256,
   mapWithConcurrency,
   toManifestKey,
@@ -141,22 +140,6 @@ export async function writeManifest(snapshotDir: string, manifest: Manifest): Pr
   await atomicWriteFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-function normalizeRelativePath(relativePath: string): string {
-  return toManifestKey(relativePath);
-}
-
-/** Recursively list files under `dir` as paths relative to `baseDir`. */
-export function collectFiles(dir: string, baseDir: string = dir): Promise<string[]> {
-  return collectFilesRecursive(dir, baseDir);
-}
-
-/** Convert absolute file paths to paths relative to `baseDir`. */
-export function collectFilesFromPaths(filePaths: readonly string[], baseDir: string): string[] {
-  return filePaths.map((filePath) =>
-    normalizeRelativePath(path.isAbsolute(filePath) ? path.relative(baseDir, filePath) : filePath),
-  );
-}
-
 /**
  * Build a complete manifest for `snapshotDir`. When `precomputedHashes` is
  * supplied (from `dedup()`), matching hashes are reused instead of re-reading
@@ -174,8 +157,8 @@ export async function buildManifest(
   const entries = filePaths
     ? filePaths.map((entry) =>
         typeof entry === 'string'
-          ? { path: normalizeRelativePath(entry), size: undefined }
-          : { path: normalizeRelativePath(entry.path), size: entry.size },
+          ? { path: toManifestKey(entry), size: undefined }
+          : { path: toManifestKey(entry.path), size: entry.size },
       )
     : await collectEntries(snapshotDir, snapshotDir);
   const uniqueSortedEntries = [...new Map(entries.map((e) => [e.path, e])).values()].sort((a, b) =>

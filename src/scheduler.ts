@@ -191,10 +191,6 @@ export class Scheduler {
     this.armAt(lastBackupMs + this.intervalMs);
   }
 
-  reset(intervalHours: number, lastBackupIso?: string): void {
-    this.start(intervalHours, lastBackupIso);
-  }
-
   /** Run a backup, skipping if one is already in flight. */
   async executeScheduledBackup(): Promise<BackupResult | null> {
     if (this.running) {
@@ -302,20 +298,8 @@ export function createScheduler(dependencies: SchedulerDependencies = {}): Sched
 
 const defaultScheduler = createScheduler();
 
-export function startScheduler(intervalHours: number, lastBackupIso?: string): void {
-  defaultScheduler.start(intervalHours, lastBackupIso);
-}
-
 export function stopScheduler(): void {
   defaultScheduler.stop();
-}
-
-export function resetScheduler(intervalHours: number, lastBackupIso?: string): void {
-  defaultScheduler.reset(intervalHours, lastBackupIso);
-}
-
-export function executeScheduledBackup(): Promise<BackupResult | null> {
-  return defaultScheduler.executeScheduledBackup();
 }
 
 export function isSchedulerRunning(): boolean {
@@ -327,7 +311,3 @@ export async function initScheduler(dependencies?: SchedulerDependencies): Promi
   await scheduler.init();
   return scheduler;
 }
-
-/** Alias kept for parity with the plan's naming. */
-export const scheduleBackup = startScheduler;
-export const cancelScheduledBackup = stopScheduler;

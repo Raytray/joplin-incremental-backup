@@ -9,7 +9,6 @@ import {
   assertDiskSpace,
   atomicWriteFile,
   collectEntries,
-  collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
   errorCode,
@@ -32,7 +31,6 @@ import {
   setLastSnapshot,
   setLastBackupResult,
   setLastBackupResultJson,
-  SETTING_KEYS,
 } from './settings';
 import { ToastType } from 'api/types';
 import type { Settings } from './settings';
@@ -186,20 +184,8 @@ export interface BackupResult {
   durationMs?: number;
   /** Human-readable duration, e.g. "1.2s". */
   duration?: string;
-  /** Alias for `duration`. */
-  elapsed?: string;
   /** Semantic change summary relative to the previous snapshot. */
   changes?: BackupChanges;
-  /** Alias for `changes`. */
-  changed?: BackupChanges;
-  /** Alias for `changes`. */
-  diff?: BackupChanges;
-  /** Convenience count of added files. */
-  added?: number;
-  /** Convenience count of modified files. */
-  modified?: number;
-  /** Convenience count of deleted files. */
-  deleted?: number;
 }
 
 export interface BackupOptions {
@@ -612,10 +598,6 @@ export async function retryTransient<T>(
   throw lastError;
 }
 
-export async function collectActiveFiles(activeDir: string): Promise<string[]> {
-  return collectFilesRecursive(activeDir, activeDir);
-}
-
 async function resolveJoplinVersion(): Promise<string> {
   try {
     const info = await joplin.versionInfo();
@@ -674,7 +656,7 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
  * Log, toast and persist a failed run so "Show last backup result" reflects
  * it. Persistence errors are swallowed: they must never mask the original.
  */
-async function recordFailure(startTime: number, error: unknown): Promise<void> {
+async function recordFailure(startTime: number, finishedAt: Date, error: unknown): Promise<void> {
   const durationMs = Date.now() - startTime;
   const duration = `${(durationMs / 1000).toFixed(1)}s`;
   const message = error instanceof Error ? error.message : String(error);
@@ -686,15 +668,16 @@ async function recordFailure(startTime: number, error: unknown): Promise<void> {
       duration: 6000,
     })
     .catch(() => undefined);
+  const finishedIso = finishedAt.toISOString();
   try {
     const record = JSON.stringify({
       status: 'failed',
       startedAt: new Date(startTime).toISOString(),
-      finishedAt: new Date().toISOString(),
+      finishedAt: finishedIso,
       durationMs,
       error: message,
     });
-    await setLastBackupResult(`${new Date().toISOString()} — failed — ${duration} — ${message}`);
+    await setLastBackupResult(`${finishedIso} — failed — ${duration} — ${message}`);
     await setLastBackupResultJson(record);
   } catch {
     // Persistence must never mask the original error.
@@ -715,7 +698,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
-    await recordFailure(startTime, error);
+    await recordFailure(startTime, options.now ?? new Date(), error);
     throw error;
   }
   const { settings, backupRoot, lockPath, activeDir } = context;
@@ -764,13 +747,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         status: 'skipped',
         durationMs,
         duration,
-        elapsed: duration,
         changes,
-        changed: changes,
-        diff: changes,
-        added: 0,
-        modified: 0,
-        deleted: 0,
         message: 'No changes detected; backup skipped.',
       };
       void joplin.views.dialogs
@@ -779,15 +756,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       const record = JSON.stringify({
         status: 'skipped',
         startedAt: new Date(startTime).toISOString(),
-        finishedAt: new Date().toISOString(),
+        finishedAt: nowIso,
         durationMs,
         changes,
         warnings: [],
         message: result.message,
       });
-      await setLastBackupResult(
-        `Skipped (no changes) at ${new Date().toISOString()} — ${duration}`,
-      );
+      await setLastBackupResult(`Skipped (no changes) at ${nowIso} — ${duration}`);
       await setLastBackupResultJson(record);
       logger.info('No changes detected; backup skipped.');
       return result;
@@ -940,13 +915,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings: warningMessages,
       durationMs,
       duration,
-      elapsed: duration,
       changes,
-      changed: changes,
-      diff: changes,
-      added: changes.added.length,
-      modified: changes.modified.length,
-      deleted: changes.deleted.length,
       message:
         `Backup complete: ${manifest.fileCount} files in ${snapshotName} in ${duration}.` +
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
@@ -958,7 +927,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const record = JSON.stringify({
       status: 'success',
       startedAt: new Date(startTime).toISOString(),
-      finishedAt: new Date().toISOString(),
+      finishedAt: finishedIso,
       durationMs,
       snapshotName,
       fileCount: manifest.fileCount,
@@ -991,7 +960,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    await recordFailure(startTime, error);
+    await recordFailure(startTime, options.now ?? new Date(), error);
     throw error;
   } finally {
     heartbeat.stop();
@@ -1121,6 +1090,3 @@ export async function recoverBackupDirs(options: BackupOptions = {}): Promise<vo
     logger.warn('Backup directory recovery skipped.', error);
   }
 }
-
-export { SETTING_KEYS };
-export type { Settings };

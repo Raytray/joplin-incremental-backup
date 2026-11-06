@@ -11,8 +11,6 @@ import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import {
   buildManifest,
-  collectFiles,
-  collectFilesFromPaths,
   isValidManifest,
   MANIFEST_FILENAME,
   readManifest,
@@ -106,26 +104,6 @@ describe('buildManifest', () => {
     const manifest = await buildManifest(SNAPSHOT, meta(), ['b.txt', 'a.txt', 'a.txt']);
 
     expect(manifest.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt']);
-  });
-});
-
-describe('collectFiles / collectFilesFromPaths', () => {
-  it('lists files recursively relative to the base directory', async () => {
-    await fs.mkdir(path.join(SNAPSHOT, 'nested'), { recursive: true });
-    await fs.writeFile(path.join(SNAPSHOT, 'one.txt'), '1');
-    await fs.writeFile(path.join(SNAPSHOT, 'nested', 'two.txt'), '2');
-
-    const files = await collectFiles(SNAPSHOT);
-    expect(files.sort()).toEqual(['nested/two.txt', 'one.txt']);
-  });
-
-  it('converts absolute paths to relative paths', () => {
-    const result = collectFilesFromPaths(
-      [path.join(SNAPSHOT, 'a.txt'), path.join(SNAPSHOT, 'sub', 'b.txt'), 'already/relative.txt'],
-      SNAPSHOT,
-    );
-
-    expect(result).toEqual(['a.txt', 'sub/b.txt', 'already/relative.txt']);
   });
 });
 

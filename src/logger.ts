@@ -18,5 +18,3 @@ export const logger: Logger = {
   error: (...args) => write('error', args),
   debug: (...args) => write('debug', args),
 };
-
-export default logger;
