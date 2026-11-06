@@ -241,6 +241,26 @@ describe('recoverBackupDirs', () => {
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).resolves.toBeDefined();
   });
 });
+describe('runBackup — clock went backwards', () => {
+  it('keeps the new snapshot and points latest.txt at it', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    setSettings({ [SETTING_KEYS.backupRetention]: 1, [SETTING_KEYS.onlyOnChange]: false });
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    await run({ now: new Date('2026-06-01T00:00:00.000Z') });
+    const result = await run({ now: new Date('2026-01-01T00:00:00.000Z') });
+
+    expect(result.snapshotName).toBe('20260101T000000');
+    expect(await fs.readdir(root)).toContain('20260101T000000');
+    expect(await fs.readdir(root)).not.toContain('20260601T000000');
+    expect((await fs.readFile(path.join(root, LATEST_FILENAME), 'utf8')).trim()).toBe(
+      '20260101T000000',
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/clock may have gone backwards/));
+    warn.mockRestore();
+  });
+});
+
 describe('unset backup directory', () => {
   beforeEach(() => {
     setSettings({ [SETTING_KEYS.backupPath]: '' });
