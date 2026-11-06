@@ -25,6 +25,7 @@ import { dedup, getDeduplicationMode } from './dedup';
 import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
+  addInitializedBackupRoot,
   getSettings,
   requireBackupPath,
   setLastBackup,
@@ -42,6 +43,12 @@ export const LOCK_FILENAME = '.backup.lock';
  */
 export const ACTIVE_DIR_PREFIX = '_joplin_active_';
 export const LATEST_FILENAME = 'latest.txt';
+/**
+ * Marker written into every backup directory the plugin sets up. Its absence
+ * from a directory that was set up before means the directory is not the one
+ * we were writing to (most often: the backup drive is not mounted).
+ */
+export const ROOT_MARKER_FILENAME = '.joplin-incremental-backup';
 export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
 export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
@@ -648,6 +655,58 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
   };
 }
 
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    return (await fs.stat(filePath)).isFile();
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export function backupRootUnavailableMessage(backupRoot: string): string {
+  return (
+    `The backup directory "${backupRoot}" is not available: its marker file ` +
+    `(${ROOT_MARKER_FILENAME}) is missing. If the backup drive is disconnected or not ` +
+    'mounted, reconnect it and try again. If you moved or deleted the backups on purpose, ' +
+    `create an empty file named ${ROOT_MARKER_FILENAME} in that directory, or choose a ` +
+    'different one in Tools > Options > Incremental Backup.'
+  );
+}
+
+/**
+ * Make sure `backupRoot` is the directory this plugin has been writing to
+ * before anything is written there.
+ *
+ * Creating the directory blindly (`mkdir -p`) is dangerous when it lives on a
+ * drive that is not mounted: the path is recreated on the internal disk, the
+ * disk-space check measures the wrong filesystem, and the snapshots end up
+ * hidden underneath the mount point once the drive comes back.
+ *
+ * - Marker present → ready.
+ * - Marker missing, directory set up before → refuse (drive likely missing).
+ * - Marker missing, directory never set up → create it and write the marker.
+ *   This includes directories used by versions before the marker existed.
+ */
+export async function prepareBackupRoot(
+  backupRoot: string,
+  initializedRoots: readonly string[],
+): Promise<void> {
+  const markerPath = path.join(backupRoot, ROOT_MARKER_FILENAME);
+  if (await fileExists(markerPath)) return;
+
+  if (initializedRoots.includes(backupRoot)) {
+    throw new Error(backupRootUnavailableMessage(backupRoot));
+  }
+
+  await ensureBackupRoot(backupRoot);
+  await atomicWriteFile(
+    markerPath,
+    'This directory holds Joplin Incremental Backup snapshots. Do not delete this file.\n',
+  );
+  await addInitializedBackupRoot(backupRoot);
+}
+
 // ---------------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------------
@@ -690,7 +749,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   let context: ResolvedContext;
   try {
     context = await resolveContext(options);
-    await ensureBackupRoot(context.backupRoot);
+    await prepareBackupRoot(context.backupRoot, context.settings.initializedBackupRoots);
     // Gate before locking: never commit to a run (or leave a lock behind) when
     // there is provably not enough space.
     await assertDiskSpace(context.backupRoot, context.minFreeBytes);
@@ -1052,8 +1111,9 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 }
 
 /**
- * Crash-recovery helper used by `onStart`: recreate the root and clear staging
- * directories left behind by a crashed run.
+ * Crash-recovery helper used by `onStart`: clear staging directories left
+ * behind by a crashed run. It never creates the backup directory: a missing
+ * one (e.g. an unplugged drive) simply has nothing to recover.
  *
  * A live backup holds the lock; when the lock is fresh nothing is removed, so
  * a second Joplin instance pointed at the same backup root cannot destroy a
@@ -1070,7 +1130,6 @@ export async function recoverBackupDirs(options: BackupOptions = {}): Promise<vo
       logger.info(`Skipping backup directory recovery: ${(error as Error).message}`);
       return;
     }
-    await ensureBackupRoot(backupRoot);
 
     const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
     if (await hasFreshLock(path.join(backupRoot, LOCK_FILENAME), staleLockMs)) {

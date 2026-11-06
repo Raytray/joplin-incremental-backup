@@ -44,12 +44,19 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 ├── 20261021T090000/              ← next snapshot (unchanged files hardlinked)
 ├── _joplin_active_20261021T090000_12345_abcdef/  ← staging dir (only while running)
 ├── latest.txt                    ← name of the newest snapshot
+├── .joplin-incremental-backup    ← marker: this is a backup directory
 └── .backup.lock                  ← present only while a backup is running
 ```
 
 Notes, notebooks, tags and note-tags are each written as a single `<id>.md` file directly in the snapshot root (this mirrors Joplin's Raw export exactly); only attachments live under `resources/`.
 
 The staging directory is unique per run (embedding the start time, process id, and a random suffix) so two concurrent runs can never write into the same directory. On startup, any leftover staging directories older than the stale-lock threshold are cleaned up — unless another Joplin instance holds a fresh lock, in which case they are left untouched.
+
+### Disconnected backup drives
+
+The first backup to a directory creates it and writes a marker file, `.joplin-incremental-backup`. After that, the plugin refuses to back up to that directory if the marker is missing, instead of recreating the directory. This protects against an unmounted drive: without the check, a path like `/mnt/backup/joplin` would be recreated on the internal disk, the snapshots would go there, and they would be hidden under the mount point once the drive came back.
+
+If you moved or deleted the backups on purpose, create an empty `.joplin-incremental-backup` file in the directory, or choose a different directory.
 
 ### Scheduler catch-up behaviour
 

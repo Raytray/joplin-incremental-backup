@@ -42,6 +42,7 @@ function makeSettings(backupInterval: number, lastBackup = '', backupPath = BACK
     onlyOnChange: true,
     lastBackup,
     lastSnapshot: '',
+    initializedBackupRoots: [],
   };
 }
 

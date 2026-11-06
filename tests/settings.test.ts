@@ -38,6 +38,7 @@ describe('getSettings', () => {
       [SETTING_KEYS.onlyOnChange]: false,
       [SETTING_KEYS.lastBackup]: '2026-01-01T00:00:00.000Z',
       [SETTING_KEYS.lastSnapshot]: '20260101T000000',
+      [SETTING_KEYS.initializedBackupRoots]: '["/tmp/backups"]',
     };
 
     await expect(getSettings()).resolves.toEqual({
@@ -49,7 +50,17 @@ describe('getSettings', () => {
       lastSnapshot: '20260101T000000',
       lastBackupResult: '',
       lastBackupResultJson: '',
+      initializedBackupRoots: ['/tmp/backups'],
     });
+  });
+
+  it('reads malformed initialized backup roots as empty', async () => {
+    for (const value of [undefined, '', 'not json', '{"a":1}']) {
+      mockState.values = { [SETTING_KEYS.initializedBackupRoots]: value };
+      expect((await getSettings()).initializedBackupRoots).toEqual([]);
+    }
+    mockState.values = { [SETTING_KEYS.initializedBackupRoots]: '["/a", 3, "/b"]' };
+    expect((await getSettings()).initializedBackupRoots).toEqual(['/a', '/b']);
   });
 
   it('returns an empty backupPath instead of throwing when unset', async () => {

@@ -16,6 +16,8 @@ export const SETTING_KEYS = {
   // Human-readable summary of the most recent backup run, shown in Options.
   lastBackupResult: 'lastBackupResult',
   lastBackupResultJson: 'lastBackupResultJson',
+  // JSON array of backup directories this plugin has set up (and marked).
+  initializedBackupRoots: 'initializedBackupRoots',
 } as const;
 
 export const DEFAULT_RETENTION = 5;
@@ -33,6 +35,8 @@ export interface Settings {
   lastSnapshot: string;
   lastBackupResult?: string;
   lastBackupResultJson?: string;
+  /** Backup directories this plugin has set up before (see `prepareBackupRoot`). */
+  initializedBackupRoots: string[];
 }
 
 export function buildSettings(): Record<string, SettingItem> {
@@ -104,6 +108,13 @@ export function buildSettings(): Record<string, SettingItem> {
       public: false,
       section: SETTING_SECTION_NAME,
       label: 'Last backup result (JSON)',
+    },
+    [SETTING_KEYS.initializedBackupRoots]: {
+      value: '[]',
+      type: SettingItemType.String,
+      public: false,
+      section: SETTING_SECTION_NAME,
+      label: 'Initialized backup directories',
     },
   };
 }
@@ -250,7 +261,21 @@ export async function getSettings(): Promise<Settings> {
     lastSnapshot: String(values[SETTING_KEYS.lastSnapshot] ?? ''),
     lastBackupResult: String(values[SETTING_KEYS.lastBackupResult] ?? ''),
     lastBackupResultJson: String(values[SETTING_KEYS.lastBackupResultJson] ?? ''),
+    initializedBackupRoots: parseStringArray(values[SETTING_KEYS.initializedBackupRoots]),
   };
+}
+
+/** Parse a JSON string array setting; anything malformed reads as empty. */
+function parseStringArray(value: unknown): string[] {
+  if (typeof value !== 'string' || !value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export function isSchedulerEnabled(
@@ -275,4 +300,14 @@ export async function setLastBackupResult(value: string): Promise<void> {
 
 export async function setLastBackupResultJson(value: string): Promise<void> {
   await joplin.settings.setValue(SETTING_KEYS.lastBackupResultJson, value);
+}
+
+/** Remember that `backupRoot` has been set up, so a later disappearance is detected. */
+export async function addInitializedBackupRoot(backupRoot: string): Promise<void> {
+  const { initializedBackupRoots } = await getSettings();
+  if (initializedBackupRoots.includes(backupRoot)) return;
+  await joplin.settings.setValue(
+    SETTING_KEYS.initializedBackupRoots,
+    JSON.stringify([...initializedBackupRoots, backupRoot]),
+  );
 }
