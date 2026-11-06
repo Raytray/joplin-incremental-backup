@@ -12,6 +12,9 @@ import {
   setLastBackup,
   setLastSnapshot,
   validateBackupPath,
+  hasBackupPath,
+  requireBackupPath,
+  MISSING_BACKUP_PATH_MESSAGE,
 } from '../src/settings';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { logger } from '../src/logger';
@@ -52,9 +55,16 @@ describe('getSettings', () => {
     });
   });
 
-  it('throws when backupPath is empty', async () => {
+  it('returns an empty backupPath instead of throwing when unset', async () => {
     mockState.values = { [SETTING_KEYS.backupPath]: '   ' };
-    await expect(getSettings()).rejects.toThrow(/Backup path/);
+    const settings = await getSettings();
+    expect(settings.backupPath).toBe('');
+    expect(hasBackupPath(settings)).toBe(false);
+  });
+
+  it('requireBackupPath throws a user-facing error only when unset', () => {
+    expect(() => requireBackupPath({ backupPath: '' })).toThrow(MISSING_BACKUP_PATH_MESSAGE);
+    expect(requireBackupPath({ backupPath: '/tmp/backups' })).toBe('/tmp/backups');
   });
 
   it('clamps retention to at least 1 and defaults on invalid input', async () => {

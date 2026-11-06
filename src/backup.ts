@@ -26,6 +26,8 @@ import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
   getSettings,
+  hasBackupPath,
+  requireBackupPath,
   setLastBackup,
   setLastSnapshot,
   setLastBackupResult,
@@ -192,6 +194,17 @@ export function resolveBackupRoot(backupPath: string, profileName?: string): str
   const base = backupPath.replace(/[/\\]+$/, '');
   if (!profileName || !profileName.trim()) return base;
   return path.join(base, profileName.trim());
+}
+
+/**
+ * The backup root for this run: the explicit override (tests), otherwise the
+ * configured directory. Throws a user-facing error when no directory is set,
+ * so an empty setting can never resolve to a relative path in the working
+ * directory.
+ */
+function configuredBackupRoot(settings: Settings, options: BackupOptions): string {
+  if (options.backupRoot !== undefined) return options.backupRoot;
+  return resolveBackupRoot(requireBackupPath(settings), options.profileName);
 }
 
 export function activeDirPath(backupRoot: string, runName?: string): string {
@@ -509,8 +522,7 @@ function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () =
 
 async function resolveContext(options: BackupOptions): Promise<ResolvedContext> {
   const settings = await getSettings();
-  const backupRoot =
-    options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+  const backupRoot = configuredBackupRoot(settings, options);
 
   return {
     settings,
@@ -841,8 +853,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
 export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyResult> {
   const settings = await getSettings();
-  const backupRoot =
-    options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+  const backupRoot = configuredBackupRoot(settings, options);
   const computeHash = options.computeHash ?? computeFileSha256;
 
   const snapshotName = await resolveLastSnapshot(backupRoot, settings.lastSnapshot || undefined);
@@ -921,8 +932,11 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 export async function recoverBackupDirs(options: BackupOptions = {}): Promise<void> {
   try {
     const settings = await getSettings();
-    const backupRoot =
-      options.backupRoot ?? resolveBackupRoot(settings.backupPath, options.profileName);
+    if (options.backupRoot === undefined && !hasBackupPath(settings)) {
+      logger.info('No backup directory is set; nothing to recover.');
+      return;
+    }
+    const backupRoot = configuredBackupRoot(settings, options);
     await ensureBackupRoot(backupRoot);
 
     const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;

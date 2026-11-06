@@ -193,12 +193,28 @@ export function validateBackupPath(
   }
 }
 
+export const MISSING_BACKUP_PATH_MESSAGE =
+  'No backup directory is set. Choose one in Tools > Options > Incremental Backup.';
+
+/** True when a backup directory has been configured. */
+export function hasBackupPath(settings: Pick<Settings, 'backupPath'>): boolean {
+  return settings.backupPath.trim().length > 0;
+}
+
+/** Return the configured backup directory, or throw a user-facing error when unset. */
+export function requireBackupPath(settings: Pick<Settings, 'backupPath'>): string {
+  if (!hasBackupPath(settings)) throw new Error(MISSING_BACKUP_PATH_MESSAGE);
+  return settings.backupPath;
+}
+
 export async function getSettings(): Promise<Settings> {
   const values = await joplin.settings.values(Object.values(SETTING_KEYS));
 
   const rawBackupPath = values[SETTING_KEYS.backupPath];
   const backupPath = typeof rawBackupPath === 'string' ? rawBackupPath.trim() : '';
-  validateBackupPath(backupPath);
+  // An unset path is a normal state (fresh install), not an error: callers
+  // that actually need a directory check it via `requireBackupPath`.
+  if (backupPath) validateBackupPath(backupPath);
 
   return {
     backupPath,

@@ -2,7 +2,7 @@ import joplin from 'api';
 import { logger } from './logger';
 import { runBackup } from './backup';
 import type { BackupResult } from './backup';
-import { getSettings, isSchedulerEnabled, SETTING_KEYS } from './settings';
+import { getSettings, hasBackupPath, isSchedulerEnabled, SETTING_KEYS } from './settings';
 import type { Settings } from './settings';
 import { errorCode } from './platform';
 
@@ -208,10 +208,23 @@ export class Scheduler {
     this.armAt(this.now() + this.intervalMs);
   }
 
-  /** Read the interval, start the timer, and watch for setting changes. */
-  async init(): Promise<void> {
-    const settings = await this.loadSettings();
+  /**
+   * Arm (or disarm) the timer from the current settings. Automatic backups
+   * stay paused until a backup directory is set; otherwise a fresh install
+   * would attempt — and fail — a backup every few minutes.
+   */
+  private applySettings(settings: Settings): void {
+    if (!hasBackupPath(settings)) {
+      this.stop();
+      logger.info('Auto-backup paused: no backup directory is set.');
+      return;
+    }
     this.start(settings.backupInterval, settings.lastBackup);
+  }
+
+  /** Read the settings, start the timer, and watch for setting changes. */
+  async init(): Promise<void> {
+    this.applySettings(await this.loadSettings());
 
     await joplin.settings.onChange((event) => {
       void this.handleSettingsChange(event.keys);
@@ -219,13 +232,14 @@ export class Scheduler {
   }
 
   async handleSettingsChange(keys: readonly string[]): Promise<void> {
-    if (!keys.includes(SETTING_KEYS.backupInterval)) return;
+    if (!keys.includes(SETTING_KEYS.backupInterval) && !keys.includes(SETTING_KEYS.backupPath)) {
+      return;
+    }
 
     try {
-      const settings = await this.loadSettings();
-      this.reset(settings.backupInterval, settings.lastBackup);
+      this.applySettings(await this.loadSettings());
     } catch (error) {
-      logger.error('Could not apply the updated backup interval.', error);
+      logger.error('Could not apply the updated backup settings.', error);
     }
   }
 }

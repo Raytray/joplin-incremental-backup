@@ -34,9 +34,9 @@ function successResult(): BackupResult {
   return { status: 'success', message: 'ok' };
 }
 
-function makeSettings(backupInterval: number, lastBackup = ''): Settings {
+function makeSettings(backupInterval: number, lastBackup = '', backupPath = BACKUP_ROOT): Settings {
   return {
-    backupPath: BACKUP_ROOT,
+    backupPath,
     backupRetention: 5,
     backupInterval,
     onlyOnChange: true,
@@ -433,6 +433,68 @@ describe('Scheduler.init and settings changes', () => {
     await scheduler.handleSettingsChange([SETTING_KEYS.onlyOnChange]);
 
     expect(manual.timers).toHaveLength(1);
+  });
+});
+
+describe('Scheduler without a backup directory', () => {
+  it('does not arm a timer at startup when no backup directory is set', async () => {
+    const manual = createManualTimers();
+    const runBackup = vi.fn(async () => successResult());
+    const scheduler = createScheduler({
+      runBackup,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', ''),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+
+    expect(scheduler.isRunning()).toBe(false);
+    expect(manual.timers).toHaveLength(0);
+    expect(runBackup).not.toHaveBeenCalled();
+  });
+
+  it('starts once a backup directory is set', async () => {
+    const manual = createManualTimers();
+    let backupPath = '';
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    expect(scheduler.isRunning()).toBe(false);
+
+    backupPath = BACKUP_ROOT;
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(scheduler.isRunning()).toBe(true);
+    expect(manual.timers[0].timeout).toBe(CATCH_UP_GRACE_MS);
+  });
+
+  it('stops when the backup directory is cleared', async () => {
+    const manual = createManualTimers();
+    let backupPath = BACKUP_ROOT;
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, '', backupPath),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    expect(scheduler.isRunning()).toBe(true);
+
+    backupPath = '';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+
+    expect(scheduler.isRunning()).toBe(false);
+    expect(manual.timers[0].cleared).toBe(true);
   });
 });
 

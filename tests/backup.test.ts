@@ -34,7 +34,7 @@ import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
-import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
+import { MISSING_BACKUP_PATH_MESSAGE, SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
 const PROFILE = 'default';
@@ -415,6 +415,28 @@ describe('runBackup — onlyOnChange', () => {
     stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
+  });
+});
+
+describe('unset backup directory', () => {
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.backupPath]: '' });
+  });
+
+  it('runBackup fails with a user-facing error and exports nothing', async () => {
+    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+    expect(mockState.executedCommands).toHaveLength(0);
+  });
+
+  it('verifyBackup fails with a user-facing error', async () => {
+    await expect(verifyBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+  });
+
+  it('recoverBackupDirs is a quiet no-op', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    await expect(recoverBackupDirs()).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 
