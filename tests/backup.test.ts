@@ -696,43 +696,6 @@ describe('runBackup — onlyOnChange', () => {
 });
 
 describe('runBackup — failures', () => {
-  it('retries a transient error while reading the vault inventory', async () => {
-    const get = vi.spyOn(joplin.data, 'get').mockRejectedValueOnce(new Error('database is locked'));
-    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    try {
-      const result = await run();
-      expect(result.status).toBe('success');
-    } finally {
-      get.mockRestore();
-    }
-  });
-
-  it('re-reads the notebook list before each export attempt', async () => {
-    setData({ notes: [{ id: 'n1', updated_time: 1000 }], folders: [{ id: 'f-old' }] });
-    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
-    const exportedWith: unknown[] = [];
-    let attempt = 0;
-    mockState.commandHandlers.exportFolders = async (ids, _format, target) => {
-      attempt += 1;
-      exportedWith.push(ids);
-      if (attempt === 1) {
-        // A notebook is created and another deleted while the first attempt runs.
-        mockState.dataItems.folders = [{ id: 'f-new' }];
-        throw new Error('database is locked');
-      }
-      const dir = String(target);
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
-      await fs.writeFile(path.join(dir, 'f-new.md'), 'folder');
-    };
-
-    const result = await run();
-
-    expect(result.status).toBe('success');
-    expect(exportedWith).toEqual([['f-old'], ['f-new']]);
-    expect(result.warnings).toEqual([]);
-  });
-
   it('aborts before locking or snapshotting when disk space is insufficient', async () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
 
@@ -908,5 +871,44 @@ describe('verifyBackup', () => {
 describe('settings section', () => {
   it('uses the documented section name', () => {
     expect(SETTING_SECTION_NAME).toBe('incrementalBackup');
+  });
+});
+
+describe('runBackup — inventory and notebook list', () => {
+  it('retries a transient error while reading the vault inventory', async () => {
+    const get = vi.spyOn(joplin.data, 'get').mockRejectedValueOnce(new Error('database is locked'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await run();
+      expect(result.status).toBe('success');
+    } finally {
+      get.mockRestore();
+    }
+  });
+
+  it('re-reads the notebook list before each export attempt', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1000 }], folders: [{ id: 'f-old' }] });
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const exportedWith: unknown[] = [];
+    let attempt = 0;
+    mockState.commandHandlers.exportFolders = async (ids, _format, target) => {
+      attempt += 1;
+      exportedWith.push(ids);
+      if (attempt === 1) {
+        // A notebook is created and another deleted while the first attempt runs.
+        mockState.dataItems.folders = [{ id: 'f-new' }];
+        throw new Error('database is locked');
+      }
+      const dir = String(target);
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
+      await fs.writeFile(path.join(dir, 'f-new.md'), 'folder');
+    };
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(exportedWith).toEqual([['f-old'], ['f-new']]);
+    expect(result.warnings).toEqual([]);
   });
 });
