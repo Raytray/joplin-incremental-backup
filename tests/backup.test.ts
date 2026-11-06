@@ -196,6 +196,79 @@ describe('recoverBackupDirs', () => {
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).resolves.toBeDefined();
   });
 });
+describe('unset backup directory', () => {
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.backupPath]: '' });
+  });
+
+  it('runBackup fails with a user-facing error and exports nothing', async () => {
+    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+    expect(mockState.executedCommands).toHaveLength(0);
+  });
+
+  it('verifyBackup fails with a user-facing error', async () => {
+    await expect(verifyBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+  });
+
+  it('recoverBackupDirs is a quiet no-op', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    await expect(recoverBackupDirs()).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('records the failure so "Show last backup result" and a toast report it', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(
+      /failed — .*No backup directory is set/,
+    );
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
+  });
+});
+
+describe('relative backup directory', () => {
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.backupPath]: 'relative/backups' });
+  });
+
+  it('runBackup refuses it and creates nothing in the working directory', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup()).rejects.toThrow(/not an absolute path/);
+    expect(mockState.executedCommands).toHaveLength(0);
+    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('recoverBackupDirs leaves it alone', async () => {
+    const warn = vi.spyOn(logger, 'warn');
+    await recoverBackupDirs();
+    expect(warn).not.toHaveBeenCalled();
+    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
+    warn.mockRestore();
+  });
+});
+
+describe('runBackup — setup failures', () => {
+  it('records a disk-space failure before the lock is taken', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(run({ minFreeBytes: Number.MAX_SAFE_INTEGER })).rejects.toThrow(
+      /Not enough free disk space/,
+    );
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/failed/);
+  });
+
+  it('does not record lock contention as a failure of the running backup', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    await fs.writeFile(path.join(root, LOCK_FILENAME), new Date().toISOString());
+
+    await expect(run()).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBeUndefined();
+  });
+});
+
 describe('getChangeFingerprint', () => {
   it('collects max note time, note count, and max resource time', async () => {
     setData({
@@ -415,79 +488,6 @@ describe('runBackup — onlyOnChange', () => {
     stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
-  });
-});
-
-describe('unset backup directory', () => {
-  beforeEach(() => {
-    setSettings({ [SETTING_KEYS.backupPath]: '' });
-  });
-
-  it('runBackup fails with a user-facing error and exports nothing', async () => {
-    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
-    expect(mockState.executedCommands).toHaveLength(0);
-  });
-
-  it('verifyBackup fails with a user-facing error', async () => {
-    await expect(verifyBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
-  });
-
-  it('recoverBackupDirs is a quiet no-op', async () => {
-    const warn = vi.spyOn(logger, 'warn');
-    await expect(recoverBackupDirs()).resolves.toBeUndefined();
-    expect(warn).not.toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it('records the failure so "Show last backup result" and a toast report it', async () => {
-    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
-    await expect(runBackup()).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
-
-    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(
-      /failed — .*No backup directory is set/,
-    );
-    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
-    expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
-    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
-  });
-});
-
-describe('relative backup directory', () => {
-  beforeEach(() => {
-    setSettings({ [SETTING_KEYS.backupPath]: 'relative/backups' });
-  });
-
-  it('runBackup refuses it and creates nothing in the working directory', async () => {
-    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
-    await expect(runBackup()).rejects.toThrow(/not an absolute path/);
-    expect(mockState.executedCommands).toHaveLength(0);
-    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
-  });
-
-  it('recoverBackupDirs leaves it alone', async () => {
-    const warn = vi.spyOn(logger, 'warn');
-    await recoverBackupDirs();
-    expect(warn).not.toHaveBeenCalled();
-    await expect(fs.stat('relative')).rejects.toMatchObject({ code: 'ENOENT' });
-    warn.mockRestore();
-  });
-});
-
-describe('runBackup — setup failures', () => {
-  it('records a disk-space failure before the lock is taken', async () => {
-    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
-    await expect(run({ minFreeBytes: Number.MAX_SAFE_INTEGER })).rejects.toThrow(
-      /Not enough free disk space/,
-    );
-    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/failed/);
-  });
-
-  it('does not record lock contention as a failure of the running backup', async () => {
-    const root = path.join(BACKUP_ROOT, PROFILE);
-    await fs.writeFile(path.join(root, LOCK_FILENAME), new Date().toISOString());
-
-    await expect(run()).rejects.toMatchObject({ code: 'EEXIST' });
-    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBeUndefined();
   });
 });
 
