@@ -1070,3 +1070,41 @@ describe('runBackup — inventory and notebook list', () => {
     expect(result.warnings).toEqual([]);
   });
 });
+
+describe('runBackup — result timestamps', () => {
+  const injected = new Date('2026-03-04T05:06:07.000Z');
+  const injectedIso = injected.toISOString();
+  const lastResult = () => String(mockState.values[SETTING_KEYS.lastBackupResult]);
+  const lastRecord = () => JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+
+  it('uses the injected time for lastBackup and the success summary', async () => {
+    await run({ now: injected });
+
+    expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(injectedIso);
+    expect(lastResult()).toMatch(new RegExp(`^${injectedIso} — success`));
+    expect(lastRecord().finishedAt).toBe(injectedIso);
+  });
+
+  it('uses the injected time for lastBackup and the skipped summary', async () => {
+    await run();
+    stubExport([{ path: 'n1.md', content: 'hello' }]);
+    const second = await run({ now: injected });
+
+    expect(second.status).toBe('skipped');
+    expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(injectedIso);
+    expect(lastResult()).toBe(`Skipped (no changes) at ${injectedIso} — ${second.duration}`);
+    expect(lastRecord().finishedAt).toBe(injectedIso);
+  });
+
+  it('uses the injected time for the failed summary', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    mockState.commandHandlers.exportFolders = async () => {
+      throw new Error('boom');
+    };
+
+    await expect(run({ now: injected })).rejects.toThrow('boom');
+
+    expect(lastResult()).toMatch(new RegExp(`^${injectedIso} — failed — .* — boom$`));
+    expect(lastRecord().finishedAt).toBe(injectedIso);
+  });
+});

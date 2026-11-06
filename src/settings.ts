@@ -108,6 +108,48 @@ export function buildSettings(): Record<string, SettingItem> {
   };
 }
 
+/**
+ * Keys written by earlier versions that nothing reads any more. Joplin rejects
+ * `setValue` on an unregistered key, so they are registered as hidden
+ * placeholders purely so `clearRetiredSettings` can wipe values left in
+ * existing profiles. Safe to drop once old installs have upgraded.
+ */
+export const RETIRED_SETTING_KEYS = [
+  'lastRunResult',
+  'lastBackupSummary',
+  'lastBackupDetails',
+  'lastBackupRun',
+  'lastBackupRunResult',
+] as const;
+
+export function buildRetiredSettings(): Record<string, SettingItem> {
+  const items: Record<string, SettingItem> = {};
+  for (const key of RETIRED_SETTING_KEYS) {
+    items[key] = {
+      value: '',
+      type: SettingItemType.String,
+      public: false,
+      section: SETTING_SECTION_NAME,
+      label: `Retired (${key})`,
+    };
+  }
+  return items;
+}
+
+/** Clear values stored under retired keys. Never fails startup. */
+export async function clearRetiredSettings(): Promise<void> {
+  for (const key of RETIRED_SETTING_KEYS) {
+    try {
+      const value = await joplin.settings.value(key);
+      if (value !== undefined && value !== null && value !== '') {
+        await joplin.settings.setValue(key, '');
+      }
+    } catch (error) {
+      logger.warn(`Could not clear retired setting "${key}".`, error);
+    }
+  }
+}
+
 export async function registerSettings(): Promise<void> {
   const section: SettingSection = {
     name: SETTING_SECTION_NAME,
@@ -118,7 +160,8 @@ export async function registerSettings(): Promise<void> {
   };
 
   await joplin.settings.registerSection(SETTING_SECTION_NAME, section);
-  await joplin.settings.registerSettings(buildSettings());
+  await joplin.settings.registerSettings({ ...buildSettings(), ...buildRetiredSettings() });
+  await clearRetiredSettings();
 }
 
 export function clampRetention(value: unknown): number {

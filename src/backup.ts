@@ -656,7 +656,7 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
  * Log, toast and persist a failed run so "Show last backup result" reflects
  * it. Persistence errors are swallowed: they must never mask the original.
  */
-async function recordFailure(startTime: number, error: unknown): Promise<void> {
+async function recordFailure(startTime: number, finishedAt: Date, error: unknown): Promise<void> {
   const durationMs = Date.now() - startTime;
   const duration = `${(durationMs / 1000).toFixed(1)}s`;
   const message = error instanceof Error ? error.message : String(error);
@@ -668,15 +668,16 @@ async function recordFailure(startTime: number, error: unknown): Promise<void> {
       duration: 6000,
     })
     .catch(() => undefined);
+  const finishedIso = finishedAt.toISOString();
   try {
     const record = JSON.stringify({
       status: 'failed',
       startedAt: new Date(startTime).toISOString(),
-      finishedAt: new Date().toISOString(),
+      finishedAt: finishedIso,
       durationMs,
       error: message,
     });
-    await setLastBackupResult(`${new Date().toISOString()} — failed — ${duration} — ${message}`);
+    await setLastBackupResult(`${finishedIso} — failed — ${duration} — ${message}`);
     await setLastBackupResultJson(record);
   } catch {
     // Persistence must never mask the original error.
@@ -697,7 +698,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
-    await recordFailure(startTime, error);
+    await recordFailure(startTime, options.now ?? new Date(), error);
     throw error;
   }
   const { settings, backupRoot, lockPath, activeDir } = context;
@@ -755,15 +756,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       const record = JSON.stringify({
         status: 'skipped',
         startedAt: new Date(startTime).toISOString(),
-        finishedAt: new Date().toISOString(),
+        finishedAt: nowIso,
         durationMs,
         changes,
         warnings: [],
         message: result.message,
       });
-      await setLastBackupResult(
-        `Skipped (no changes) at ${new Date().toISOString()} — ${duration}`,
-      );
+      await setLastBackupResult(`Skipped (no changes) at ${nowIso} — ${duration}`);
       await setLastBackupResultJson(record);
       logger.info('No changes detected; backup skipped.');
       return result;
@@ -928,7 +927,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const record = JSON.stringify({
       status: 'success',
       startedAt: new Date(startTime).toISOString(),
-      finishedAt: new Date().toISOString(),
+      finishedAt: finishedIso,
       durationMs,
       snapshotName,
       fileCount: manifest.fileCount,
@@ -961,7 +960,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    await recordFailure(startTime, error);
+    await recordFailure(startTime, options.now ?? new Date(), error);
     throw error;
   } finally {
     heartbeat.stop();

@@ -7,6 +7,7 @@ import {
   isSchedulerEnabled,
   normalizeInterval,
   registerSettings,
+  RETIRED_SETTING_KEYS,
   SETTING_KEYS,
   SETTING_SECTION_NAME,
   setLastBackup,
@@ -17,7 +18,7 @@ import {
   requireBackupPath,
   MISSING_BACKUP_PATH_MESSAGE,
 } from '../src/settings';
-import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
+import joplin, { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { logger } from '../src/logger';
 
 function registeredSettings(): Record<string, { public: boolean; value: unknown }> {
@@ -160,6 +161,43 @@ describe('registerSettings', () => {
     expect(settings[SETTING_KEYS.onlyOnChange].public).toBe(true);
     expect(settings[SETTING_KEYS.lastBackup].public).toBe(false);
     expect(settings[SETTING_KEYS.lastSnapshot].public).toBe(false);
+  });
+
+  it('registers retired keys as hidden and clears values left by older versions', async () => {
+    mockState.values.lastBackupSummary = 'old summary';
+    mockState.values.lastBackupDetails = '{"old":true}';
+
+    await registerSettings();
+
+    const settings = registeredSettings();
+    for (const key of RETIRED_SETTING_KEYS) {
+      expect(settings[key].public).toBe(false);
+    }
+    expect(mockState.values.lastBackupSummary).toBe('');
+    expect(mockState.values.lastBackupDetails).toBe('');
+    // Keys with nothing stored are left alone.
+    expect(mockState.setValues.map((entry) => entry.key).sort()).toEqual([
+      'lastBackupDetails',
+      'lastBackupSummary',
+    ]);
+  });
+
+  it('does not fail startup when a retired setting cannot be cleared', async () => {
+    mockState.values.lastRunResult = 'old';
+    const setValue = vi
+      .spyOn(joplin.settings, 'setValue')
+      .mockRejectedValue(new Error('settings unavailable'));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(registerSettings()).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('lastRunResult'),
+        expect.any(Error),
+      );
+    } finally {
+      setValue.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('buildSettings exposes the documented defaults', () => {

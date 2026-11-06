@@ -316,8 +316,6 @@ describe('plugin startup (onStart)', () => {
 
     expect(mockState.registeredSection?.name).toBe(SETTING_SECTION_NAME);
     expect(Object.keys(mockState.registeredSettings ?? {}).length).toBeGreaterThan(0);
-    expect(mockState.registeredCommands[CREATE_COMMAND]).toBeDefined();
-    expect(mockState.registeredCommands[VERIFY_COMMAND]).toBeDefined();
     expect(Object.keys(mockState.registeredCommands).sort()).toEqual(
       [CREATE_COMMAND, SHOW_LAST_BACKUP_RESULT_COMMAND, VERIFY_COMMAND].sort(),
     );
