@@ -26,7 +26,6 @@ import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
   getSettings,
-  hasBackupPath,
   requireBackupPath,
   setLastBackup,
   setLastSnapshot,
@@ -198,9 +197,9 @@ export function resolveBackupRoot(backupPath: string, profileName?: string): str
 
 /**
  * The backup root for this run: the explicit override (tests), otherwise the
- * configured directory. Throws a user-facing error when no directory is set,
- * so an empty setting can never resolve to a relative path in the working
- * directory.
+ * configured directory. Throws a user-facing error when the directory is unset
+ * or not absolute, so a bad setting can never resolve to a path in the
+ * working directory. This is the only place that decision is made.
  */
 function configuredBackupRoot(settings: Settings, options: BackupOptions): string {
   if (options.backupRoot !== undefined) return options.backupRoot;
@@ -540,19 +539,58 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
 // Backup
 // ---------------------------------------------------------------------------
 
-export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
-  const context = await resolveContext(options);
-  const { settings, backupRoot, lockPath, activeDir } = context;
+/**
+ * Log, toast and persist a failed run so "Show last backup result" reflects
+ * it. Persistence errors are swallowed: they must never mask the original.
+ */
+async function recordFailure(startTime: number, error: unknown): Promise<void> {
+  const durationMs = Date.now() - startTime;
+  const duration = `${(durationMs / 1000).toFixed(1)}s`;
+  const message = error instanceof Error ? error.message : String(error);
+  logger.error('Backup failed.', error);
+  void joplin.views.dialogs
+    .showToast({
+      message: `Backup failed after ${duration}.`,
+      type: ToastType.Error,
+      duration: 6000,
+    })
+    .catch(() => undefined);
+  try {
+    const record = JSON.stringify({
+      status: 'failed',
+      startedAt: new Date(startTime).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs,
+      error: message,
+    });
+    await setLastBackupResult(`${new Date().toISOString()} — failed — ${duration} — ${message}`);
+    await setLastBackupResultJson(record);
+  } catch {
+    // Persistence must never mask the original error.
+  }
+}
 
-  await ensureBackupRoot(backupRoot);
-  // Gate before locking: never commit to a run (or leave a lock behind) when
-  // there is provably not enough space.
-  await assertDiskSpace(backupRoot, context.minFreeBytes);
+export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
+  const startTime = Date.now();
+
+  let context: ResolvedContext;
+  try {
+    context = await resolveContext(options);
+    await ensureBackupRoot(context.backupRoot);
+    // Gate before locking: never commit to a run (or leave a lock behind) when
+    // there is provably not enough space.
+    await assertDiskSpace(context.backupRoot, context.minFreeBytes);
+  } catch (error) {
+    // Setup failures (no/invalid directory, low disk space) are recorded like
+    // any other failed run. Lock contention below is not: it means another
+    // run is in progress and will record its own result.
+    await recordFailure(startTime, error);
+    throw error;
+  }
+  const { settings, backupRoot, lockPath, activeDir } = context;
 
   await acquireLock(lockPath, context.staleLockMs);
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
-
-  const startTime = Date.now();
 
   try {
     logger.info('Starting backup run...');
@@ -806,31 +844,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    const durationMs = Date.now() - startTime;
-    const duration = `${(durationMs / 1000).toFixed(1)}s`;
-    logger.error('Backup failed.', error);
-    void joplin.views.dialogs
-      .showToast({
-        message: `Backup failed after ${duration}.`,
-        type: ToastType.Error,
-        duration: 6000,
-      })
-      .catch(() => undefined);
-    try {
-      const record = JSON.stringify({
-        status: 'failed',
-        startedAt: new Date(startTime).toISOString(),
-        finishedAt: new Date().toISOString(),
-        durationMs,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await setLastBackupResult(
-        `${new Date().toISOString()} — failed — ${duration} — ${error instanceof Error ? error.message : String(error)}`,
-      );
-      await setLastBackupResultJson(record);
-    } catch {
-      // Persistence must never mask the original error.
-    }
+    await recordFailure(startTime, error);
     throw error;
   } finally {
     heartbeat.stop();
@@ -932,11 +946,14 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 export async function recoverBackupDirs(options: BackupOptions = {}): Promise<void> {
   try {
     const settings = await getSettings();
-    if (options.backupRoot === undefined && !hasBackupPath(settings)) {
-      logger.info('No backup directory is set; nothing to recover.');
+    let backupRoot: string;
+    try {
+      backupRoot = configuredBackupRoot(settings, options);
+    } catch (error) {
+      // No usable directory configured: nothing to recover, and not worth a warning.
+      logger.info(`Skipping backup directory recovery: ${(error as Error).message}`);
       return;
     }
-    const backupRoot = configuredBackupRoot(settings, options);
     await ensureBackupRoot(backupRoot);
 
     const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;

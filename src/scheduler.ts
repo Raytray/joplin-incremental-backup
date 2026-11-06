@@ -1,10 +1,11 @@
 import joplin from 'api';
 import { logger } from './logger';
-import { runBackup } from './backup';
+import { resolveBackupRoot, runBackup } from './backup';
 import type { BackupResult } from './backup';
 import { getSettings, hasBackupPath, isSchedulerEnabled, SETTING_KEYS } from './settings';
 import type { Settings } from './settings';
 import { errorCode } from './platform';
+import { listSnapshots } from './retention';
 
 export const HOUR_IN_MS = 60 * 60 * 1000;
 
@@ -37,6 +38,17 @@ export interface SchedulerDependencies {
   loadSettings?: () => Promise<Settings>;
   /** Injectable clock, in milliseconds since the epoch. */
   now?: () => number;
+  /** Whether a backup directory already holds at least one snapshot. */
+  hasSnapshots?: (backupPath: string) => Promise<boolean>;
+}
+
+async function directoryHasSnapshots(backupPath: string): Promise<boolean> {
+  try {
+    return (await listSnapshots(resolveBackupRoot(backupPath))).length > 0;
+  } catch {
+    // Unreadable: treat as empty so a backup runs soon and reports the real error.
+    return false;
+  }
 }
 
 /** Parse a persisted `lastBackup` timestamp; invalid values mean "never". */
@@ -61,12 +73,22 @@ export class Scheduler {
   private handle: ReturnType<typeof setTimeout> | null = null;
   private running = false;
   private intervalMs = 0;
+  /**
+   * Bumped whenever the schedule is replaced or stopped. A timer or an
+   * in-flight backup belongs to the generation it was armed in; when it
+   * finishes under a newer generation it must not re-arm, or a paused
+   * scheduler would restart and a replaced timer would be orphaned.
+   */
+  private generation = 0;
+  /** Backup path the current schedule was computed for (`undefined` before init). */
+  private appliedPath: string | undefined;
 
   private readonly runBackup: BackupRunner;
   private readonly setTimeoutFn: NonNullable<SchedulerDependencies['setTimeoutFn']>;
   private readonly clearTimeoutFn: NonNullable<SchedulerDependencies['clearTimeoutFn']>;
   private readonly loadSettings: () => Promise<Settings>;
   private readonly now: () => number;
+  private readonly hasSnapshots: (backupPath: string) => Promise<boolean>;
 
   constructor(dependencies: SchedulerDependencies = {}) {
     this.runBackup = dependencies.runBackup ?? runBackup;
@@ -75,6 +97,7 @@ export class Scheduler {
     this.clearTimeoutFn = dependencies.clearTimeoutFn ?? ((handle) => clearTimeout(handle));
     this.loadSettings = dependencies.loadSettings ?? getSettings;
     this.now = dependencies.now ?? (() => Date.now());
+    this.hasSnapshots = dependencies.hasSnapshots ?? directoryHasSnapshots;
   }
 
   isRunning(): boolean {
@@ -82,6 +105,7 @@ export class Scheduler {
   }
 
   stop(): void {
+    this.generation += 1;
     if (this.handle !== null) {
       this.clearTimeoutFn(this.handle);
       this.handle = null;
@@ -96,17 +120,18 @@ export class Scheduler {
    */
   private armAt(dueAt: number): void {
     const delay = dueAt - this.now();
+    const generation = this.generation;
 
     if (delay > MAX_TIMEOUT_MS) {
       this.handle = this.setTimeoutFn(() => {
-        this.armAt(dueAt);
+        if (generation === this.generation) this.armAt(dueAt);
       }, MAX_TIMEOUT_MS);
       return;
     }
 
     this.handle = this.setTimeoutFn(
       () => {
-        void this.tick();
+        if (generation === this.generation) void this.tick(generation);
       },
       Math.max(0, delay),
     );
@@ -193,10 +218,14 @@ export class Scheduler {
   }
 
   /** The timer fired: run a backup and re-arm the next one. */
-  private async tick(): Promise<void> {
+  private async tick(generation: number): Promise<void> {
     this.handle = null;
 
     const result = await this.executeScheduledBackup();
+
+    // The settings changed while the backup ran: whoever changed them has
+    // already re-armed (or paused) the schedule.
+    if (generation !== this.generation) return;
 
     if (result === null) {
       // The run failed (or was skipped because another one was in flight).
@@ -209,22 +238,37 @@ export class Scheduler {
   }
 
   /**
-   * Arm (or disarm) the timer from the current settings. Automatic backups
-   * stay paused until a backup directory is set; otherwise a fresh install
-   * would attempt — and fail — a backup every few minutes.
+   * Arm (or disarm) the timer from the current settings.
+   *
+   * Automatic backups stay paused until a usable backup directory is set;
+   * otherwise a fresh install would attempt — and fail — a backup every few
+   * minutes. When the directory changes to one with no snapshots yet, the
+   * `lastBackup` time (which belongs to the old directory) is ignored so the
+   * new one gets a catch-up backup shortly instead of waiting an interval.
    */
-  private applySettings(settings: Settings): void {
+  private async applySettings(settings: Settings): Promise<void> {
+    const previousPath = this.appliedPath;
+    this.appliedPath = settings.backupPath;
+
     if (!hasBackupPath(settings)) {
       this.stop();
-      logger.info('Auto-backup paused: no backup directory is set.');
+      logger.info('Auto-backup paused: no usable backup directory is set.');
       return;
     }
+
+    const pathChanged = previousPath !== undefined && previousPath !== settings.backupPath;
+    if (pathChanged && !(await this.hasSnapshots(settings.backupPath))) {
+      logger.info('Backup directory changed to one with no snapshots; scheduling a backup soon.');
+      this.start(settings.backupInterval, undefined);
+      return;
+    }
+
     this.start(settings.backupInterval, settings.lastBackup);
   }
 
   /** Read the settings, start the timer, and watch for setting changes. */
   async init(): Promise<void> {
-    this.applySettings(await this.loadSettings());
+    await this.applySettings(await this.loadSettings());
 
     await joplin.settings.onChange((event) => {
       void this.handleSettingsChange(event.keys);
@@ -237,7 +281,7 @@ export class Scheduler {
     }
 
     try {
-      this.applySettings(await this.loadSettings());
+      await this.applySettings(await this.loadSettings());
     } catch (error) {
       logger.error('Could not apply the updated backup settings.', error);
     }
