@@ -24,8 +24,10 @@ import {
   LATEST_FILENAME,
   listStagingDirs,
   LOCK_FILENAME,
+  prepareBackupRoot,
   recoverBackupDirs,
   resolveBackupRoot,
+  ROOT_MARKER_FILENAME,
   resolveLastSnapshot,
   resolveUniqueSnapshotName,
   retryTransient,
@@ -241,6 +243,140 @@ describe('recoverBackupDirs', () => {
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).resolves.toBeDefined();
   });
 });
+describe('backup directory marker', () => {
+  const root = path.join(BACKUP_ROOT, PROFILE);
+  const markerPath = path.join(root, ROOT_MARKER_FILENAME);
+
+  function initializedRoots(): unknown {
+    return JSON.parse(String(mockState.values[SETTING_KEYS.initializedBackupRoots] ?? '[]'));
+  }
+
+  it('sets up a new directory: creates it, writes the marker and remembers it', async () => {
+    const fresh = '/new-drive/joplin';
+
+    await prepareBackupRoot(fresh, []);
+
+    await expect(fs.stat(path.join(fresh, ROOT_MARKER_FILENAME))).resolves.toBeDefined();
+    expect(initializedRoots()).toEqual([fresh]);
+  });
+
+  it('adopts an existing directory from before the marker existed', async () => {
+    await fs.mkdir(path.join(root, '20260101T000000'), { recursive: true });
+
+    await prepareBackupRoot(root, []);
+
+    await expect(fs.stat(markerPath)).resolves.toBeDefined();
+    expect(initializedRoots()).toEqual([root]);
+  });
+
+  it('accepts a directory that has its marker', async () => {
+    await fs.writeFile(markerPath, '');
+
+    await expect(prepareBackupRoot(root, [root])).resolves.toBeUndefined();
+    expect(mockState.setValues).toEqual([]);
+  });
+
+  it('refuses a set-up directory that has vanished (unmounted drive) and creates nothing', async () => {
+    const unmounted = '/mnt/usb/joplin';
+
+    await expect(prepareBackupRoot(unmounted, [unmounted])).rejects.toThrow(/not available/);
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses a set-up directory whose marker is gone (empty mount point)', async () => {
+    await expect(prepareBackupRoot(root, [root])).rejects.toThrow(ROOT_MARKER_FILENAME);
+    await expect(fs.stat(markerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('runBackup records the failure and exports nothing when the drive is missing', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const unmounted = '/mnt/usb/joplin';
+    setSettings({ [SETTING_KEYS.initializedBackupRoots]: JSON.stringify([unmounted]) });
+
+    await expect(run({ backupRoot: unmounted })).rejects.toThrow(/not available/);
+
+    expect(mockState.executedCommands).toHaveLength(0);
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(
+      /failed — .*not available/,
+    );
+  });
+
+  it('runBackup writes the marker on first use', async () => {
+    await run();
+
+    await expect(fs.stat(markerPath)).resolves.toBeDefined();
+    expect(initializedRoots()).toEqual([root]);
+  });
+
+  it('recoverBackupDirs never creates a missing backup directory', async () => {
+    const unmounted = '/mnt/usb/joplin';
+
+    await recoverBackupDirs({ backupRoot: unmounted });
+
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('remembers a directory whose marker was created by hand', async () => {
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(markerPath, '');
+
+    await prepareBackupRoot(root, []);
+
+    expect(initializedRoots()).toEqual([root]);
+  });
+
+  it('then refuses that directory once its marker disappears', async () => {
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(markerPath, '');
+    await prepareBackupRoot(root, []);
+    await fs.rm(root, { recursive: true });
+
+    const roots = initializedRoots() as string[];
+    await expect(prepareBackupRoot(root, roots)).rejects.toThrow(/not available/);
+    await expect(fs.stat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('treats other spellings of a set-up directory as the same directory', async () => {
+    const unmounted = '/mnt/usb/joplin';
+
+    for (const spelling of ['/mnt/usb//joplin', '/mnt/usb/./joplin', '/mnt/usb/x/../joplin']) {
+      await expect(prepareBackupRoot(spelling, [unmounted])).rejects.toThrow(/not available/);
+    }
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('on the first run after upgrading, refuses to create a missing directory', async () => {
+    const unmounted = '/mnt/usb/joplin';
+    await fs.mkdir('/mnt/usb', { recursive: true }); // empty mount point
+
+    await expect(prepareBackupRoot(unmounted, [], true)).rejects.toThrow(/does not exist/);
+
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(initializedRoots()).toEqual([]);
+  });
+
+  it('on the first run after upgrading, still adopts the existing directory', async () => {
+    await fs.mkdir(path.join(root, '20260101T000000'), { recursive: true });
+
+    await prepareBackupRoot(root, [], true);
+
+    await expect(fs.stat(markerPath)).resolves.toBeDefined();
+    expect(initializedRoots()).toEqual([root]);
+  });
+
+  it('runBackup refuses a missing directory when backups predate any recorded one', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const unmounted = '/mnt/usb/joplin';
+    setSettings({ [SETTING_KEYS.lastBackup]: '2026-01-01T00:00:00.000Z' });
+
+    await expect(run({ backupRoot: unmounted })).rejects.toThrow(/does not exist/);
+
+    expect(mockState.executedCommands).toHaveLength(0);
+    await expect(fs.stat(unmounted)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
 describe('unset backup directory', () => {
   beforeEach(() => {
     setSettings({ [SETTING_KEYS.backupPath]: '' });
