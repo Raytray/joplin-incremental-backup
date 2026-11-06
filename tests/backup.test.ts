@@ -15,6 +15,7 @@ import {
   ACTIVE_DIR_PREFIX,
   collectActiveFiles,
   createStagingDirName,
+  describeWarnings,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -766,6 +767,102 @@ describe('runBackup — onlyOnChange', () => {
     stubExport([{ path: 'n1.md', content: 'hello' }]);
     const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
     expect(second.status).toBe('success');
+  });
+});
+
+describe('describeWarnings', () => {
+  it('is empty when there are no warnings', () => {
+    expect(describeWarnings([])).toBe('');
+  });
+
+  it('counts only exporter warnings as skipped items', () => {
+    const text = describeWarnings([
+      { kind: 'export', message: 'a' },
+      { kind: 'export', message: 'b' },
+    ]);
+    expect(text).toMatch(/2 item\(s\) were skipped by the export/);
+    expect(text).toMatch(/may be incomplete/);
+  });
+
+  it('lists the count and kind of each completeness warning', () => {
+    const text = describeWarnings([
+      { kind: 'completeness', message: 'long note text', summary: '3 note(s)' },
+      { kind: 'completeness', message: 'long resource text', summary: '40 of 200 resource(s)' },
+    ]);
+    expect(text).not.toMatch(/skipped by the export/);
+    expect(text).toMatch(/Missing from the export: 3 note\(s\), 40 of 200 resource\(s\)\./);
+    expect(text).toMatch(/may be incomplete/);
+  });
+
+  it('mentions storage warnings without calling the snapshot incomplete', () => {
+    const text = describeWarnings([{ kind: 'storage', message: 'no hardlinks' }]);
+    expect(text).toMatch(/Deduplication was limited/);
+    expect(text).toMatch(/1 warning\(s\)/);
+    expect(text).not.toMatch(/may be incomplete/);
+  });
+});
+
+describe('runBackup — success bookkeeping', () => {
+  it('reports the hardlink fallback as a warning without calling the snapshot incomplete', async () => {
+    await run();
+
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+    try {
+      stubExport([{ path: 'n1.md', content: 'hello' }]);
+      setData({ notes: [{ id: 'n1', updated_time: 2000 }], folders: [] });
+      const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+      expect(second.status).toBe('success');
+      expect(second.warnings).toEqual([expect.stringMatching(/Hardlinks are not supported/)]);
+      expect(second.message).not.toMatch(/skipped by the export/);
+      expect(second.message).not.toMatch(/may be incomplete/);
+      expect(second.message).toMatch(/Deduplication was limited/);
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  it('reports per-file dedup failures as a storage warning', async () => {
+    await run();
+
+    const link = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('i/o error'), { code: 'EIO' }));
+    try {
+      stubExport([{ path: 'n1.md', content: 'hello' }]);
+      setData({ notes: [{ id: 'n1', updated_time: 2000 }], folders: [] });
+      const second = await run({ now: new Date('2026-01-02T04:00:00.000Z') });
+
+      expect(second.status).toBe('success');
+      expect(second.warnings).toEqual([
+        expect.stringMatching(/1 file\(s\) could not be deduplicated/),
+      ]);
+      expect(second.message).toMatch(/Deduplication was limited/);
+      expect(second.message).not.toMatch(/may be incomplete/);
+    } finally {
+      link.mockRestore();
+    }
+  });
+
+  it('persists lastBackup/lastSnapshot and logs completion exactly once', async () => {
+    const info = vi.spyOn(logger, 'info');
+    try {
+      const result = await run();
+
+      const writes = (key: string) => mockState.setValues.filter((entry) => entry.key === key);
+      expect(writes(SETTING_KEYS.lastBackup)).toHaveLength(1);
+      expect(writes(SETTING_KEYS.lastSnapshot)).toEqual([
+        { key: SETTING_KEYS.lastSnapshot, value: result.snapshotName },
+      ]);
+      const completions = info.mock.calls.filter(
+        ([message]) => typeof message === 'string' && message.startsWith('Backup complete'),
+      );
+      expect(completions).toHaveLength(1);
+    } finally {
+      info.mockRestore();
+    }
   });
 });
 

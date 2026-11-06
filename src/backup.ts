@@ -63,6 +63,54 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+/**
+ * What a warning affects:
+ * - `export`: an item the exporter itself reported as skipped.
+ * - `completeness`: items inferred missing from a database/export count mismatch.
+ * - `storage`: the snapshot is complete, but deduplication was limited, so it
+ *   uses more disk space than expected (e.g. no hardlink support).
+ */
+export type BackupWarningKind = 'export' | 'completeness' | 'storage';
+
+export interface BackupWarning {
+  kind: BackupWarningKind;
+  /** Full text, shown in the warnings list. */
+  message: string;
+  /** Short form for the result message (e.g. "3 note(s)"); defaults to `message`. */
+  summary?: string;
+}
+
+/**
+ * Summary sentences for the result message, derived from the tagged warnings
+ * so that every warning source is reflected without extra wiring.
+ */
+export function describeWarnings(warnings: readonly BackupWarning[]): string {
+  const ofKind = (kind: BackupWarningKind) => warnings.filter((w) => w.kind === kind);
+  const exported = ofKind('export');
+  const completeness = ofKind('completeness');
+  const storage = ofKind('storage');
+
+  const parts: string[] = [];
+  if (exported.length > 0) {
+    parts.push(`${exported.length} item(s) were skipped by the export.`);
+  }
+  if (completeness.length > 0) {
+    parts.push(
+      `Missing from the export: ${completeness.map((w) => w.summary ?? w.message).join(', ')}.`,
+    );
+  }
+  if (exported.length > 0 || completeness.length > 0) {
+    parts.push('The snapshot may be incomplete (see warnings).');
+  }
+  if (storage.length > 0) {
+    parts.push(
+      `Deduplication was limited, so this snapshot uses more disk space than expected ` +
+        `(${storage.length} warning(s), see warnings).`,
+    );
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+}
+
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
   /database is locked/i,
   /SQLITE_BUSY/i,
@@ -479,34 +527,43 @@ export async function getAllFolderIds(): Promise<string[]> {
  * Tags and note-tags are not checked — verifying them needs extra scans that
  * cost more than they are worth.
  */
-export function checkExportCompleteness(input: CompletenessCheckInput): string[] {
+export function checkExportCompleteness(input: CompletenessCheckInput): BackupWarning[] {
   const { exportedFiles, inventory, folderIds } = input;
   const exported = new Set(exportedFiles);
-  const warnings: string[] = [];
+  const warnings: BackupWarning[] = [];
 
   const missingNotes = inventory.noteIds.filter((id) => !exported.has(`${id}.md`));
   if (missingNotes.length > 0) {
-    warnings.push(
-      `${missingNotes.length} note(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingNotes.length} note(s) are missing from the export ` +
         `(e.g. ${missingNotes.slice(0, 3).join(', ')}); they may still be encrypted.`,
-    );
+      summary: `${missingNotes.length} note(s)`,
+    });
   }
 
   const missingFolders = folderIds.filter((id) => !exported.has(`${id}.md`));
   if (missingFolders.length > 0) {
-    warnings.push(
-      `${missingFolders.length} notebook(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingFolders.length} notebook(s) are missing from the export ` +
         `(e.g. ${missingFolders.slice(0, 3).join(', ')}).`,
-    );
+      summary: `${missingFolders.length} notebook(s)`,
+    });
   }
 
   const resourcePrefix = `${RESOURCES_DIR_NAME}/`;
   const exportedResources = exportedFiles.filter((file) => file.startsWith(resourcePrefix)).length;
   if (exportedResources < inventory.resourceCount) {
-    warnings.push(
-      `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
         'some attachments may be missing.',
-    );
+      summary: `${inventory.resourceCount - exportedResources} of ${inventory.resourceCount} resource(s)`,
+    });
   }
 
   return warnings;
@@ -780,9 +837,15 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       folderIds,
     });
     if (completenessWarnings.length > 0) {
-      logger.warn('The export looks incomplete:', completenessWarnings);
+      logger.warn(
+        'The export looks incomplete:',
+        completenessWarnings.map((w) => w.message),
+      );
     }
-    const warnings = [...exportWarnings, ...completenessWarnings];
+    const warnings: BackupWarning[] = [
+      ...exportWarnings.map((message): BackupWarning => ({ kind: 'export', message })),
+      ...completenessWarnings,
+    ];
 
     logger.info('Deduplicating against previous snapshot...');
     const dedupResult: DedupResult = await dedup(
@@ -837,27 +900,33 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
 
-    const nowIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(nowIso);
+    // Persist the committed snapshot immediately so settings never lag behind
+    // what is on disk, even if later result/message building throws.
+    const finishedIso = (options.now ?? new Date()).toISOString();
+    await setLastBackup(finishedIso);
     await setLastSnapshot(snapshotName);
 
     // Warn if hardlinks are unsupported — the user may not realize each snapshot
     // consumes full vault size when the filesystem falls back to copies.
     if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
-      warnings.push(
-        'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
-      );
+      warnings.push({
+        kind: 'storage',
+        message:
+          'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+      });
     }
+    if (dedupResult.failed > 0) {
+      warnings.push({
+        kind: 'storage',
+        message:
+          `${dedupResult.failed} file(s) could not be deduplicated against the previous snapshot; ` +
+          'full copies were kept instead (see the log for details).',
+      });
+    }
+    const warningMessages = warnings.map((w) => w.message);
 
     const durationMs = Date.now() - startTime;
     const elapsed = (durationMs / 1000).toFixed(1);
-    logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
-        `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
-        (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
-        (warnings.length ? `, ${warnings.length} warning(s)` : ''),
-    );
-
     const duration = `${elapsed}s`;
     const result: BackupResult = {
       status: 'success',
@@ -868,7 +937,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       hardlinked: dedupResult.hardlinked,
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
-      warnings,
+      warnings: warningMessages,
       durationMs,
       duration,
       elapsed: duration,
@@ -883,20 +952,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
           ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
           : ' No file changes.') +
-        (warnings.length > 0
-          ? ` ${warnings.length} item(s) were skipped by the export (see log); the snapshot may be incomplete.`
-          : ''),
+        describeWarnings(warnings),
     };
-
-    void joplin.views.dialogs
-      .showToast({
-        message:
-          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
-          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
-        type: ToastType.Success,
-        duration: 6000,
-      })
-      .catch(() => undefined);
 
     const record = JSON.stringify({
       status: 'success',
@@ -906,24 +963,31 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       snapshotName,
       fileCount: manifest.fileCount,
       changes,
-      warnings,
+      warnings: warningMessages,
       message: result.message,
     });
-    const finishedIso = (options.now ?? new Date()).toISOString();
-    await setLastBackup(finishedIso);
-    await setLastSnapshot(snapshotName);
     await setLastBackupResult(
       `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
         `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
     );
     await setLastBackupResultJson(record);
 
+    // Only announce completion once everything has been persisted.
     logger.info(
       `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
         `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
         (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
         (warnings.length ? `, ${warnings.length} warning(s)` : ''),
     );
+    void joplin.views.dialogs
+      .showToast({
+        message:
+          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
+          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
+        type: ToastType.Success,
+        duration: 6000,
+      })
+      .catch(() => undefined);
 
     return result;
   } catch (error) {
