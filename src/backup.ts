@@ -60,24 +60,51 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * Summary sentence for the result message. Only exporter warnings are items
- * the exporter itself reported as skipped; completeness warnings are inferred
- * from a count mismatch, and other warnings (e.g. no hardlink support) don't
- * affect what the snapshot contains, so each is described separately.
+ * What a warning affects:
+ * - `export`: an item the exporter itself reported as skipped.
+ * - `completeness`: items inferred missing from a database/export count mismatch.
+ * - `storage`: the snapshot is complete, but deduplication was limited, so it
+ *   uses more disk space than expected (e.g. no hardlink support).
  */
-export function describeWarnings(
-  exportWarningCount: number,
-  completenessWarningCount: number,
-): string {
+export type BackupWarningKind = 'export' | 'completeness' | 'storage';
+
+export interface BackupWarning {
+  kind: BackupWarningKind;
+  /** Full text, shown in the warnings list. */
+  message: string;
+  /** Short form for the result message (e.g. "3 note(s)"); defaults to `message`. */
+  summary?: string;
+}
+
+/**
+ * Summary sentences for the result message, derived from the tagged warnings
+ * so that every warning source is reflected without extra wiring.
+ */
+export function describeWarnings(warnings: readonly BackupWarning[]): string {
+  const ofKind = (kind: BackupWarningKind) => warnings.filter((w) => w.kind === kind);
+  const exported = ofKind('export');
+  const completeness = ofKind('completeness');
+  const storage = ofKind('storage');
+
   const parts: string[] = [];
-  if (exportWarningCount > 0) {
-    parts.push(`${exportWarningCount} item(s) were skipped by the export.`);
+  if (exported.length > 0) {
+    parts.push(`${exported.length} item(s) were skipped by the export.`);
   }
-  if (completenessWarningCount > 0) {
-    parts.push('Some items in the database are missing from the export.');
+  if (completeness.length > 0) {
+    parts.push(
+      `Missing from the export: ${completeness.map((w) => w.summary ?? w.message).join(', ')}.`,
+    );
   }
-  if (parts.length === 0) return '';
-  return ` ${parts.join(' ')} The snapshot may be incomplete (see warnings).`;
+  if (exported.length > 0 || completeness.length > 0) {
+    parts.push('The snapshot may be incomplete (see warnings).');
+  }
+  if (storage.length > 0) {
+    parts.push(
+      `Deduplication was limited, so this snapshot uses more disk space than expected ` +
+        `(${storage.length} warning(s), see warnings).`,
+    );
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
 }
 
 const TRANSIENT_EXPORT_ERROR_PATTERNS = [
@@ -414,34 +441,43 @@ export async function getAllFolderIds(): Promise<string[]> {
  * Tags and note-tags are not checked — verifying them needs extra scans that
  * cost more than they are worth.
  */
-export function checkExportCompleteness(input: CompletenessCheckInput): string[] {
+export function checkExportCompleteness(input: CompletenessCheckInput): BackupWarning[] {
   const { exportedFiles, inventory, folderIds } = input;
   const exported = new Set(exportedFiles);
-  const warnings: string[] = [];
+  const warnings: BackupWarning[] = [];
 
   const missingNotes = inventory.noteIds.filter((id) => !exported.has(`${id}.md`));
   if (missingNotes.length > 0) {
-    warnings.push(
-      `${missingNotes.length} note(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingNotes.length} note(s) are missing from the export ` +
         `(e.g. ${missingNotes.slice(0, 3).join(', ')}); they may still be encrypted.`,
-    );
+      summary: `${missingNotes.length} note(s)`,
+    });
   }
 
   const missingFolders = folderIds.filter((id) => !exported.has(`${id}.md`));
   if (missingFolders.length > 0) {
-    warnings.push(
-      `${missingFolders.length} notebook(s) are missing from the export ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `${missingFolders.length} notebook(s) are missing from the export ` +
         `(e.g. ${missingFolders.slice(0, 3).join(', ')}).`,
-    );
+      summary: `${missingFolders.length} notebook(s)`,
+    });
   }
 
   const resourcePrefix = `${RESOURCES_DIR_NAME}/`;
   const exportedResources = exportedFiles.filter((file) => file.startsWith(resourcePrefix)).length;
   if (exportedResources < inventory.resourceCount) {
-    warnings.push(
-      `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
+    warnings.push({
+      kind: 'completeness',
+      message:
+        `Only ${exportedResources} of ${inventory.resourceCount} resource(s) are in the export; ` +
         'some attachments may be missing.',
-    );
+      summary: `${inventory.resourceCount - exportedResources} of ${inventory.resourceCount} resource(s)`,
+    });
   }
 
   return warnings;
@@ -668,9 +704,15 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       folderIds,
     });
     if (completenessWarnings.length > 0) {
-      logger.warn('The export looks incomplete:', completenessWarnings);
+      logger.warn(
+        'The export looks incomplete:',
+        completenessWarnings.map((w) => w.message),
+      );
     }
-    const warnings = [...exportWarnings, ...completenessWarnings];
+    const warnings: BackupWarning[] = [
+      ...exportWarnings.map((message): BackupWarning => ({ kind: 'export', message })),
+      ...completenessWarnings,
+    ];
 
     logger.info('Deduplicating against previous snapshot...');
     const dedupResult: DedupResult = await dedup(
@@ -734,10 +776,21 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Warn if hardlinks are unsupported — the user may not realize each snapshot
     // consumes full vault size when the filesystem falls back to copies.
     if (lastSnapshotDir && dedupResult.copied > 0 && dedupResult.hardlinked === 0) {
-      warnings.push(
-        'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
-      );
+      warnings.push({
+        kind: 'storage',
+        message:
+          'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+      });
     }
+    if (dedupResult.failed > 0) {
+      warnings.push({
+        kind: 'storage',
+        message:
+          `${dedupResult.failed} file(s) could not be deduplicated against the previous snapshot; ` +
+          'full copies were kept instead (see the log for details).',
+      });
+    }
+    const warningMessages = warnings.map((w) => w.message);
 
     const durationMs = Date.now() - startTime;
     const elapsed = (durationMs / 1000).toFixed(1);
@@ -751,7 +804,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       hardlinked: dedupResult.hardlinked,
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
-      warnings,
+      warnings: warningMessages,
       durationMs,
       duration,
       elapsed: duration,
@@ -766,7 +819,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
           ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
           : ' No file changes.') +
-        describeWarnings(exportWarnings.length, completenessWarnings.length),
+        describeWarnings(warnings),
     };
 
     const record = JSON.stringify({
@@ -777,7 +830,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       snapshotName,
       fileCount: manifest.fileCount,
       changes,
-      warnings,
+      warnings: warningMessages,
       message: result.message,
     });
     await setLastBackupResult(
