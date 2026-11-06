@@ -11,7 +11,6 @@ import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import {
   ACTIVE_DIR_PREFIX,
-  collectActiveFiles,
   createStagingDirName,
   extractExportWarnings,
   fingerprintsEqual,
@@ -279,18 +278,6 @@ describe('resolveLastSnapshot', () => {
 
   it('returns null when there are no snapshots', async () => {
     await expect(resolveLastSnapshot(path.join(BACKUP_ROOT, PROFILE))).resolves.toBeNull();
-  });
-});
-
-describe('collectActiveFiles', () => {
-  it('lists relative paths', async () => {
-    const dir = path.join(BACKUP_ROOT, PROFILE, createStagingDirName());
-    await fs.mkdir(path.join(dir, 'sub'), { recursive: true });
-    await fs.writeFile(path.join(dir, 'a.md'), 'a');
-    await fs.writeFile(path.join(dir, 'sub', 'b.md'), 'b');
-
-    const files = await collectActiveFiles(dir);
-    expect(files.sort()).toEqual(['a.md', 'sub/b.md']);
   });
 });
 

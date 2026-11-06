@@ -8,7 +8,6 @@ import {
   assertDiskSpace,
   atomicWriteFile,
   collectEntries,
-  collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
   errorCode,
@@ -30,7 +29,6 @@ import {
   setLastSnapshot,
   setLastBackupResult,
   setLastBackupResultJson,
-  SETTING_KEYS,
 } from './settings';
 import { ToastType } from 'api/types';
 import type { Settings } from './settings';
@@ -125,20 +123,8 @@ export interface BackupResult {
   durationMs?: number;
   /** Human-readable duration, e.g. "1.2s". */
   duration?: string;
-  /** Alias for `duration`. */
-  elapsed?: string;
   /** Semantic change summary relative to the previous snapshot. */
   changes?: BackupChanges;
-  /** Alias for `changes`. */
-  changed?: BackupChanges;
-  /** Alias for `changes`. */
-  diff?: BackupChanges;
-  /** Convenience count of added files. */
-  added?: number;
-  /** Convenience count of modified files. */
-  modified?: number;
-  /** Convenience count of deleted files. */
-  deleted?: number;
 }
 
 export interface BackupOptions {
@@ -469,10 +455,6 @@ export async function retryTransient<T>(
   throw lastError;
 }
 
-export async function collectActiveFiles(activeDir: string): Promise<string[]> {
-  return collectFilesRecursive(activeDir, activeDir);
-}
-
 async function resolveJoplinVersion(): Promise<string> {
   try {
     const info = await joplin.versionInfo();
@@ -578,13 +560,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         status: 'skipped',
         durationMs,
         duration,
-        elapsed: duration,
         changes,
-        changed: changes,
-        diff: changes,
-        added: 0,
-        modified: 0,
-        deleted: 0,
         message: 'No changes detected; backup skipped.',
       };
       void joplin.views.dialogs
@@ -738,13 +714,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings,
       durationMs,
       duration,
-      elapsed: duration,
       changes,
-      changed: changes,
-      diff: changes,
-      added: changes.added.length,
-      modified: changes.modified.length,
-      deleted: changes.deleted.length,
       message:
         `Backup complete: ${manifest.fileCount} files in ${snapshotName} in ${duration}.` +
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
@@ -943,6 +913,3 @@ export async function recoverBackupDirs(options: BackupOptions = {}): Promise<vo
     logger.warn('Backup directory recovery skipped.', error);
   }
 }
-
-export { SETTING_KEYS };
-export type { Settings };

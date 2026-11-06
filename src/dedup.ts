@@ -53,10 +53,6 @@ export function buildContentIndex(manifest: Manifest | null | undefined): Conten
   return { pathIndex, hashIndex };
 }
 
-export async function collectFiles(dir: string): Promise<string[]> {
-  return collectFilesRecursive(dir, dir);
-}
-
 export function getDeduplicationMode(
   result: Pick<DedupResult, 'hardlinked' | 'copied'>,
 ): DeduplicationMode {
@@ -138,7 +134,7 @@ export async function dedup(
   activeFiles?: readonly string[],
   options: DedupOptions = {},
 ): Promise<DedupResult> {
-  const files = activeFiles ? [...activeFiles] : await collectFiles(activeDir);
+  const files = activeFiles ? [...activeFiles] : await collectFilesRecursive(activeDir);
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const computeHash = options.computeHash ?? computeFileSha256;

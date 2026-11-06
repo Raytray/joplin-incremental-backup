@@ -44,11 +44,6 @@ describe('getSettings', () => {
       lastSnapshot: '20260101T000000',
       lastBackupResult: '',
       lastBackupResultJson: '',
-      lastRunResult: '',
-      lastBackupSummary: '',
-      lastBackupDetails: '',
-      lastBackupRun: '',
-      lastBackupRunResult: '',
     });
   });
 

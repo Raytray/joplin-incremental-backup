@@ -23,7 +23,12 @@ import {
   verifyBackup,
 } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
-import { CREATE_COMMAND, VERIFY_COMMAND, MENU_ID } from '../src/index';
+import {
+  CREATE_COMMAND,
+  VERIFY_COMMAND,
+  SHOW_LAST_BACKUP_RESULT_COMMAND,
+  MENU_ID,
+} from '../src/index';
 import { MenuItemLocation } from 'api/types';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
@@ -313,6 +318,9 @@ describe('plugin startup (onStart)', () => {
     expect(Object.keys(mockState.registeredSettings ?? {}).length).toBeGreaterThan(0);
     expect(mockState.registeredCommands[CREATE_COMMAND]).toBeDefined();
     expect(mockState.registeredCommands[VERIFY_COMMAND]).toBeDefined();
+    expect(Object.keys(mockState.registeredCommands).sort()).toEqual(
+      [CREATE_COMMAND, SHOW_LAST_BACKUP_RESULT_COMMAND, VERIFY_COMMAND].sort(),
+    );
 
     const menu = mockState.createdMenus.find((entry) => entry.id === MENU_ID);
     expect(menu?.location).toBe(MenuItemLocation.Tools);

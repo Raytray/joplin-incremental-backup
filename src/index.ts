@@ -9,24 +9,7 @@ import { initScheduler } from './scheduler';
 export const CREATE_COMMAND = 'CreateIncrementalBackup';
 export const VERIFY_COMMAND = 'VerifyIncrementalBackup';
 export const SHOW_LAST_BACKUP_RESULT_COMMAND = 'ShowLastBackupResult';
-// Aliases for compatibility with alternate command names.
-export const SHOW_LAST_BACKUP_RUN_COMMAND = 'ShowLastBackupResult';
-export const SHOW_BACKUP_RESULT_COMMAND = 'ShowLastBackupResult';
-export const SHOW_LAST_BACKUP_RESULTS_COMMAND = 'ShowLastBackupResult';
-export const VIEW_LAST_BACKUP_RESULT_COMMAND = 'ShowLastBackupResult';
-export const LAST_BACKUP_RESULT_COMMAND = 'ShowLastBackupResult';
 export const MENU_ID = 'incrementalBackup.toolsMenu';
-
-const SHOW_RESULT_COMMANDS = [
-  SHOW_LAST_BACKUP_RESULT_COMMAND,
-  'ShowLastBackupRun',
-  'ShowBackupResult',
-  'ShowLastBackupResults',
-  'ViewLastBackupResult',
-  'LastBackupResult',
-  'ShowBackupRunResult',
-  'ShowLastRunResult',
-];
 
 export async function handleCreateBackup(): Promise<void> {
   try {
@@ -65,15 +48,8 @@ export async function handleVerifyBackup(): Promise<void> {
 export async function handleShowLastBackupResult(): Promise<void> {
   try {
     const settings = await getSettings();
-    const json = settings.lastBackupResultJson || settings.lastBackupDetails;
-    const summary =
-      settings.lastBackupResult ||
-      settings.lastRunResult ||
-      settings.lastBackupSummary ||
-      settings.lastBackupRun ||
-      settings.lastBackupRunResult;
-
-    let message = summary || 'No backup run has been recorded yet.';
+    const json = settings.lastBackupResultJson;
+    let message = settings.lastBackupResult || 'No backup run has been recorded yet.';
     if (json) {
       try {
         const parsed = JSON.parse(json) as Record<string, unknown>;
@@ -125,14 +101,12 @@ async function registerCommands(): Promise<void> {
     iconName: 'fas fa-check-circle',
     execute: handleVerifyBackup,
   });
-  for (const name of SHOW_RESULT_COMMANDS) {
-    await joplin.commands.register({
-      name,
-      label: 'Show last backup result',
-      iconName: 'fas fa-info-circle',
-      execute: handleShowLastBackupResult,
-    });
-  }
+  await joplin.commands.register({
+    name: SHOW_LAST_BACKUP_RESULT_COMMAND,
+    label: 'Show last backup result',
+    iconName: 'fas fa-info-circle',
+    execute: handleShowLastBackupResult,
+  });
 }
 
 async function registerMenus(): Promise<void> {

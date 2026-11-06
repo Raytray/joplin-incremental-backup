@@ -15,12 +15,6 @@ export const SETTING_KEYS = {
   // Human-readable summary of the most recent backup run, shown in Options.
   lastBackupResult: 'lastBackupResult',
   lastBackupResultJson: 'lastBackupResultJson',
-  // Aliases kept for compatibility with alternate naming.
-  lastRunResult: 'lastRunResult',
-  lastBackupSummary: 'lastBackupSummary',
-  lastBackupDetails: 'lastBackupDetails',
-  lastBackupRun: 'lastBackupRun',
-  lastBackupRunResult: 'lastBackupRunResult',
 } as const;
 
 export const DEFAULT_RETENTION = 5;
@@ -38,11 +32,6 @@ export interface Settings {
   lastSnapshot: string;
   lastBackupResult?: string;
   lastBackupResultJson?: string;
-  lastRunResult?: string;
-  lastBackupSummary?: string;
-  lastBackupDetails?: string;
-  lastBackupRun?: string;
-  lastBackupRunResult?: string;
 }
 
 export function buildSettings(): Record<string, SettingItem> {
@@ -115,41 +104,6 @@ export function buildSettings(): Record<string, SettingItem> {
       section: SETTING_SECTION_NAME,
       label: 'Last backup result (JSON)',
     },
-    [SETTING_KEYS.lastRunResult]: {
-      value: '',
-      type: SettingItemType.String,
-      public: false,
-      section: SETTING_SECTION_NAME,
-      label: 'Last run result',
-    },
-    [SETTING_KEYS.lastBackupSummary]: {
-      value: '',
-      type: SettingItemType.String,
-      public: true,
-      section: SETTING_SECTION_NAME,
-      label: 'Last backup summary',
-    },
-    [SETTING_KEYS.lastBackupDetails]: {
-      value: '',
-      type: SettingItemType.String,
-      public: false,
-      section: SETTING_SECTION_NAME,
-      label: 'Last backup details',
-    },
-    [SETTING_KEYS.lastBackupRun]: {
-      value: '',
-      type: SettingItemType.String,
-      public: false,
-      section: SETTING_SECTION_NAME,
-      label: 'Last backup run',
-    },
-    [SETTING_KEYS.lastBackupRunResult]: {
-      value: '',
-      type: SettingItemType.String,
-      public: false,
-      section: SETTING_SECTION_NAME,
-      label: 'Last backup run result',
-    },
   };
 }
 
@@ -209,11 +163,6 @@ export async function getSettings(): Promise<Settings> {
     lastSnapshot: String(values[SETTING_KEYS.lastSnapshot] ?? ''),
     lastBackupResult: String(values[SETTING_KEYS.lastBackupResult] ?? ''),
     lastBackupResultJson: String(values[SETTING_KEYS.lastBackupResultJson] ?? ''),
-    lastRunResult: String(values[SETTING_KEYS.lastRunResult] ?? ''),
-    lastBackupSummary: String(values[SETTING_KEYS.lastBackupSummary] ?? ''),
-    lastBackupDetails: String(values[SETTING_KEYS.lastBackupDetails] ?? ''),
-    lastBackupRun: String(values[SETTING_KEYS.lastBackupRun] ?? ''),
-    lastBackupRunResult: String(values[SETTING_KEYS.lastBackupRunResult] ?? ''),
   };
 }
 
@@ -233,43 +182,10 @@ export async function setLastSnapshot(snapshotDirName: string): Promise<void> {
   await joplin.settings.setValue(SETTING_KEYS.lastSnapshot, snapshotDirName);
 }
 
-const LAST_RESULT_KEYS: readonly string[] = [
-  SETTING_KEYS.lastBackupResult,
-  SETTING_KEYS.lastRunResult,
-  SETTING_KEYS.lastBackupSummary,
-  SETTING_KEYS.lastBackupRun,
-  SETTING_KEYS.lastBackupRunResult,
-];
-
-const LAST_DETAIL_KEYS: readonly string[] = [
-  SETTING_KEYS.lastBackupResultJson,
-  SETTING_KEYS.lastBackupDetails,
-];
-
 export async function setLastBackupResult(value: string): Promise<void> {
-  await Promise.all(LAST_RESULT_KEYS.map((key) => joplin.settings.setValue(key, value)));
-}
-
-export async function setLastRunResult(value: string): Promise<void> {
-  await setLastBackupResult(value);
-}
-
-export async function setLastBackupSummary(value: string): Promise<void> {
-  await setLastBackupResult(value);
+  await joplin.settings.setValue(SETTING_KEYS.lastBackupResult, value);
 }
 
 export async function setLastBackupResultJson(value: string): Promise<void> {
-  await Promise.all(LAST_DETAIL_KEYS.map((key) => joplin.settings.setValue(key, value)));
-}
-
-export async function setLastBackupDetails(value: string): Promise<void> {
-  await setLastBackupResultJson(value);
-}
-
-export async function setLastBackupRun(value: string): Promise<void> {
-  await setLastBackupResult(value);
-}
-
-export async function setLastBackupRunResult(value: string): Promise<void> {
-  await setLastBackupResult(value);
+  await joplin.settings.setValue(SETTING_KEYS.lastBackupResultJson, value);
 }
