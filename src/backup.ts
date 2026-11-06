@@ -956,6 +956,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const requestedName = generateSnapshotName(options.now ?? new Date());
     const snapshotName = await resolveUniqueSnapshotName(backupRoot, requestedName);
     const snapshotDir = snapshotDirPath(backupRoot, snapshotName);
+    if (lastSnapshotName && snapshotName < lastSnapshotName) {
+      logger.warn(
+        `New snapshot ${snapshotName} sorts before the previous one (${lastSnapshotName}); ` +
+          'the system clock may have gone backwards. Retention still keeps the new snapshot.',
+      );
+    }
 
     const meta: ManifestMeta = {
       snapshotId: snapshotName,
@@ -971,7 +977,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     await fs.rename(activeDir, snapshotDir);
     await atomicWriteFile(path.join(backupRoot, LATEST_FILENAME), snapshotName);
 
-    await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
+    await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention), snapshotName);
 
     // Persist the committed snapshot immediately so settings never lag behind
     // what is on disk, even if later result/message building throws.

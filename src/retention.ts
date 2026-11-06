@@ -26,11 +26,17 @@ export async function listSnapshots(backupRoot: string): Promise<string[]> {
 
 /**
  * Delete the oldest snapshots until at most `retentionCount` remain. A value of
- * less than 1 is clamped so the just-created snapshot is never deleted.
+ * less than 1 is clamped to 1.
+ *
+ * `keepSnapshot` (the snapshot just created) is never deleted and counts
+ * towards the limit. Snapshots are ordered by name, i.e. by the wall clock at
+ * creation, so after the clock goes backwards a new snapshot can sort as the
+ * oldest one — without this exclusion it would be pruned straight away.
  */
 export async function pruneSnapshots(
   backupRoot: string,
   retentionCount: number,
+  keepSnapshot?: string,
 ): Promise<string[]> {
   const keep = Number.isFinite(retentionCount)
     ? Math.max(MIN_RETENTION, Math.floor(retentionCount))
@@ -38,9 +44,10 @@ export async function pruneSnapshots(
 
   const snapshots = await listSnapshots(backupRoot);
   const deleteCount = Math.max(0, snapshots.length - keep);
+  const candidates = snapshots.filter((name) => name !== keepSnapshot);
   const removed: string[] = [];
 
-  for (const snapshot of snapshots.slice(0, deleteCount)) {
+  for (const snapshot of candidates.slice(0, deleteCount)) {
     await safeRmDir(path.join(backupRoot, snapshot));
     removed.push(snapshot);
   }
