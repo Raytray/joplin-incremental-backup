@@ -17,7 +17,7 @@ import {
   collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
-  hardlinkOrCopy,
+  isHardlinkUnsupportedError,
   hasFreshLock,
   mapWithConcurrency,
   releaseLock,
@@ -154,29 +154,18 @@ describe('toManifestKey', () => {
   });
 });
 
-describe('hardlinkOrCopy', () => {
-  it('prefers a hardlink when supported', async () => {
-    const src = path.join(ROOT, 'src.txt');
-    const dest = path.join(ROOT, 'dest.txt');
-    await fs.writeFile(src, 'hello');
-
-    await expect(hardlinkOrCopy(src, dest)).resolves.toBe('hardlink');
-    expect(await fs.readFile(dest, 'utf8')).toBe('hello');
+describe('isHardlinkUnsupportedError', () => {
+  it('recognizes filesystem-level link failures', () => {
+    for (const code of ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS', 'EISDIR']) {
+      expect(isHardlinkUnsupportedError(Object.assign(new Error(code), { code }))).toBe(true);
+    }
   });
 
-  it("returns 'copy' when fs.link throws EPERM", async () => {
-    const src = path.join(ROOT, 'src.txt');
-    const dest = path.join(ROOT, 'dest.txt');
-    await fs.writeFile(src, 'hello');
-
-    const linkSpy = vi
-      .spyOn(fs, 'link')
-      .mockRejectedValueOnce(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
-
-    await expect(hardlinkOrCopy(src, dest)).resolves.toBe('copy');
-    expect(await fs.readFile(dest, 'utf8')).toBe('hello');
-
-    linkSpy.mockRestore();
+  it('rejects per-file and unrelated errors', () => {
+    for (const code of ['EEXIST', 'EIO', 'ENOENT', 'EMLINK']) {
+      expect(isHardlinkUnsupportedError(Object.assign(new Error(code), { code }))).toBe(false);
+    }
+    expect(isHardlinkUnsupportedError(new Error('no code'))).toBe(false);
   });
 });
 
@@ -377,20 +366,5 @@ describe('acquireLock edge cases', () => {
 
     await expect(acquireLock(lockPath, 1000)).rejects.toMatchObject({ code: 'EACCES' });
     openSpy.mockRestore();
-  });
-});
-
-describe('hardlinkOrCopy edge cases', () => {
-  it('rethrows non-fallback link errors', async () => {
-    const src = path.join(ROOT, 'src.txt');
-    const dest = path.join(ROOT, 'dest.txt');
-    await fs.writeFile(src, 'hello');
-
-    const linkSpy = vi
-      .spyOn(fs, 'link')
-      .mockRejectedValueOnce(Object.assign(new Error('exists'), { code: 'EEXIST' }));
-
-    await expect(hardlinkOrCopy(src, dest)).rejects.toMatchObject({ code: 'EEXIST' });
-    linkSpy.mockRestore();
   });
 });
