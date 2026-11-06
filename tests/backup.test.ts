@@ -9,11 +9,12 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
+import joplin from '../src/__mocks__/joplin';
+import { digestPairs } from '../src/backup';
 import {
   ACTIVE_DIR_PREFIX,
   collectActiveFiles,
   createStagingDirName,
-  digestPairs,
   extractExportWarnings,
   fingerprintsEqual,
   generateSnapshotName,
@@ -34,7 +35,7 @@ import {
 import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { logger } from '../src/logger';
-import joplin, { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
+import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
