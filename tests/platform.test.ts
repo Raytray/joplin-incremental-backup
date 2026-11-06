@@ -156,7 +156,7 @@ describe('toManifestKey', () => {
 
 describe('isHardlinkUnsupportedError', () => {
   it('recognizes filesystem-level link failures', () => {
-    for (const code of ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']) {
+    for (const code of ['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS', 'EISDIR']) {
       expect(isHardlinkUnsupportedError(Object.assign(new Error(code), { code }))).toBe(true);
     }
   });

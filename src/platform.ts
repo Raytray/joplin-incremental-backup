@@ -8,7 +8,14 @@ const HASH_CHUNK_SIZE_LARGE = 1024 * 1024; // > 64 KB files
 const HASH_CHUNK_THRESHOLD = 64 * 1024;
 const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
-const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS']);
+/**
+ * `fs.link` codes that can mean the filesystem cannot hardlink at all. EISDIR
+ * is how libuv reports Windows' ERROR_INVALID_FUNCTION, which FAT/exFAT and
+ * some SMB shares return; the source is always a regular file, so it never
+ * means a real directory here. EPERM is ambiguous (Linux also returns it for
+ * protected_hardlinks), so callers must confirm before giving up on links.
+ */
+const HARDLINK_UNSUPPORTED_CODES = new Set(['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS', 'EISDIR']);
 const BUSY_CODES = new Set(['EBUSY', 'EPERM']);
 
 /** Extract the `code` property of a Node.js system error, if any. */
@@ -177,9 +184,10 @@ export async function releaseLock(lockPath: string): Promise<void> {
  * True when `fs.link` failed because the filesystem or platform cannot create
  * hardlinks here (FAT/exFAT, most network shares, cross-device, Windows
  * without privileges), as opposed to a problem with this particular file.
+ * Some of these codes can also be per-file (see `HARDLINK_UNSUPPORTED_CODES`).
  */
 export function isHardlinkUnsupportedError(error: unknown): boolean {
-  return HARDLINK_FALLBACK_CODES.has(errorCode(error) ?? '');
+  return HARDLINK_UNSUPPORTED_CODES.has(errorCode(error) ?? '');
 }
 
 /**

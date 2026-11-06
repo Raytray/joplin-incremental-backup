@@ -57,6 +57,10 @@ beforeEach(async () => {
   await fs.mkdir(ACTIVE, { recursive: true });
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('buildContentIndex', () => {
   it('builds path and hash indexes', () => {
     const manifest = makeManifest([
@@ -110,21 +114,19 @@ describe('dedup', () => {
     expect(result).toMatchObject({ hardlinked: 0, copied: 0, unchanged: 1 });
   });
 
-  it('copies when fs.link throws EPERM', async () => {
+  it('copies when fs.link always throws EPERM', async () => {
     await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'hello' }]);
     await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'hello' }]);
     const manifest = makeManifest([{ path: 'a.txt', content: 'hello' }]);
 
-    const linkSpy = vi
-      .spyOn(fs, 'link')
-      .mockRejectedValueOnce(Object.assign(new Error('not permitted'), { code: 'EPERM' }));
+    vi.spyOn(fs, 'link').mockRejectedValue(
+      Object.assign(new Error('not permitted'), { code: 'EPERM' }),
+    );
 
     const result = await dedup(ACTIVE, PREVIOUS, manifest, ['a.txt']);
 
     expect(result).toMatchObject({ hardlinked: 0, copied: 1, unchanged: 0 });
     expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('hello');
-
-    linkSpy.mockRestore();
   });
 
   it('hardlinks via content addressing when only the path differs', async () => {
@@ -200,7 +202,7 @@ describe('replaceWithLink', () => {
       replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt')),
     ).rejects.toMatchObject({ code: 'EIO' });
 
-    linkSpy.mockRestore();
+    expect(linkSpy).toHaveBeenCalled();
 
     // The exported file is still there, byte for byte.
     expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('original');
@@ -225,12 +227,9 @@ describe('replaceWithLink', () => {
 
     const mode = await replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt'));
 
+    expect(linkSpy).toHaveBeenCalledTimes(1);
     expect(copySpy).not.toHaveBeenCalled();
     expect(renameSpy).not.toHaveBeenCalled();
-    linkSpy.mockRestore();
-    copySpy.mockRestore();
-    renameSpy.mockRestore();
-
     expect(mode).toBe('copy');
     const after = await fs.stat(path.join(ACTIVE, 'a.txt'));
     expect(after.ino).toBe(before.ino);
@@ -242,6 +241,20 @@ describe('replaceWithLink', () => {
         .catch(() => false),
     ).toBe(false);
   });
+
+  it('rethrows a link error that is not about filesystem support', async () => {
+    await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'shared' }]);
+    await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'original' }]);
+
+    vi.spyOn(fs, 'link').mockRejectedValueOnce(
+      Object.assign(new Error('exists'), { code: 'EEXIST' }),
+    );
+
+    await expect(
+      replaceWithLink(path.join(PREVIOUS, 'a.txt'), path.join(ACTIVE, 'a.txt')),
+    ).rejects.toMatchObject({ code: 'EEXIST' });
+    expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('original');
+  });
 });
 
 describe('dedup — failure handling', () => {
@@ -250,13 +263,9 @@ describe('dedup — failure handling', () => {
     await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'hello' }]);
     const manifest = makeManifest([{ path: 'a.txt', content: 'hello' }]);
 
-    const renameSpy = vi
-      .spyOn(fs, 'rename')
-      .mockRejectedValue(Object.assign(new Error('boom'), { code: 'EIO' }));
+    vi.spyOn(fs, 'rename').mockRejectedValue(Object.assign(new Error('boom'), { code: 'EIO' }));
 
     const result = await dedup(ACTIVE, PREVIOUS, manifest, ['a.txt']);
-
-    renameSpy.mockRestore();
 
     expect(result).toMatchObject({ hardlinked: 0, copied: 0, unchanged: 0, failed: 1 });
     // The content is still correct, so the manifest hash stays valid.
@@ -288,10 +297,6 @@ describe('dedup — failure handling', () => {
 });
 
 describe('dedup — no hardlink support', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   const files = [
     { path: 'a.txt', content: 'one' },
     { path: 'b.txt', content: 'two' },
@@ -315,7 +320,8 @@ describe('dedup — no hardlink support', () => {
       files.map((f) => f.path),
     );
 
-    expect(linkSpy).toHaveBeenCalledTimes(1);
+    // One probe on the first match plus one confirming link, not one per file.
+    expect(linkSpy).toHaveBeenCalledTimes(2);
     expect(copySpy).not.toHaveBeenCalled();
     expect(result).toMatchObject({ hardlinked: 0, copied: 3, unchanged: 0, failed: 0 });
     expect(getDeduplicationMode(result)).toBe('copy');
@@ -342,6 +348,84 @@ describe('dedup — no hardlink support', () => {
     );
 
     expect(result).toMatchObject({ hardlinked: 2, copied: 0, failed: 1 });
+  });
+
+  it('keeps linking when only the first matched file is refused with EPERM', async () => {
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(ACTIVE, files);
+    const manifest = makeManifest(files);
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    // protected_hardlinks: this one file cannot be linked, but our own files can.
+    vi.spyOn(fs, 'link').mockRejectedValueOnce(
+      Object.assign(new Error('not permitted'), { code: 'EPERM' }),
+    );
+
+    const result = await dedup(
+      ACTIVE,
+      PREVIOUS,
+      manifest,
+      files.map((f) => f.path),
+    );
+
+    expect(result).toMatchObject({ hardlinked: 2, copied: 0, failed: 1 });
+    expect(getDeduplicationMode(result)).toBe('hardlink');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    // The confirmation probe leaves nothing behind.
+    expect((await fs.readdir(ACTIVE)).filter((name) => name.includes('probe'))).toEqual([]);
+  });
+
+  it('counts a later EPERM as a failure once links are known to work', async () => {
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(ACTIVE, files);
+    const manifest = makeManifest(files);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const realLink = fs.link.bind(fs);
+    vi.spyOn(fs, 'link').mockImplementation(async (source, target) => {
+      if (String(source).endsWith('b.txt')) {
+        throw Object.assign(new Error('not permitted'), { code: 'EPERM' });
+      }
+      return realLink(source, target);
+    });
+
+    const result = await dedup(
+      ACTIVE,
+      PREVIOUS,
+      manifest,
+      files.map((f) => f.path),
+    );
+
+    expect(result).toMatchObject({ hardlinked: 2, copied: 0, failed: 1 });
+  });
+
+  it('treats a missing source as unchanged on a filesystem without links', async () => {
+    const present = files.slice(0, 2);
+    await writeFiles(PREVIOUS, present);
+    await writeFiles(ACTIVE, files);
+    const manifest = makeManifest(files);
+
+    vi.spyOn(fs, 'link').mockRejectedValue(
+      Object.assign(new Error('cross-device'), { code: 'EXDEV' }),
+    );
+
+    // Hash the file with the missing source last, so the probe has already
+    // settled "unsupported" by the time it is matched.
+    const computeHash = async (filePath: string) => {
+      const content = await fs.readFile(filePath);
+      if (filePath.endsWith('c')) await new Promise((resolve) => setTimeout(resolve, 20));
+      return createHash('sha256').update(content).digest('hex');
+    };
+
+    const result = await dedup(
+      ACTIVE,
+      PREVIOUS,
+      manifest,
+      files.map((f) => f.path),
+      { computeHash },
+    );
+
+    expect(result).toMatchObject({ hardlinked: 0, copied: 2, unchanged: 1, failed: 0 });
   });
 });
 

@@ -24,9 +24,13 @@ export interface ContentIndex {
 
 export interface DedupResult {
   hardlinked: number;
+  /**
+   * Matched files left as full copies because the filesystem cannot hardlink.
+   * Nothing is copied: the exported file is already identical to the match.
+   */
   copied: number;
   unchanged: number;
-  /** Files whose link/copy could not be staged; the exported copy was kept. */
+  /** Files that could not be hardlinked on a filesystem that supports links; the exported file was kept. */
   failed: number;
   /** Normalized relative path (`toManifestKey`) → SHA-256. */
   hashes: Map<string, string>;
@@ -128,6 +132,34 @@ export async function replaceWithLink(
 }
 
 /**
+ * Whether hardlinks work between `sourcePath` and `dir`, tested with files this
+ * process owns. A link failure on one matched file can be per-file (Linux
+ * returns EPERM under protected_hardlinks for files owned by another user), so
+ * a failed probe is confirmed here before linking is turned off for the run.
+ */
+export async function canHardlink(sourcePath: string, dir: string): Promise<boolean> {
+  const [source, target] = await Promise.all([fs.stat(sourcePath), fs.stat(dir)]);
+  if (source.dev !== target.dev) return false;
+
+  const probePath = path.join(
+    dir,
+    `.hardlink_probe_${process.pid}_${Math.random().toString(36).slice(2, 8)}${DEDUP_TEMP_SUFFIX}`,
+  );
+  const linkPath = `${probePath}.link`;
+  try {
+    await fs.writeFile(probePath, '');
+    await fs.link(probePath, linkPath);
+    return true;
+  } catch (error) {
+    if (isHardlinkUnsupportedError(error)) return false;
+    throw error;
+  } finally {
+    await fs.rm(linkPath, { force: true });
+    await fs.rm(probePath, { force: true });
+  }
+}
+
+/**
  * Replace files in `activeDir` with hardlinks to identical files in the
  * previous snapshot. Files with no matching content are left untouched.
  */
@@ -145,7 +177,7 @@ export async function dedup(
   /**
    * Resolves to whether hardlinks work on this filesystem, settled by the
    * first link attempt of the run. Every later file waits for it, so an
-   * unsupported filesystem costs one failed `fs.link`, not one per file.
+   * unsupported filesystem costs one failed probe, not one per file.
    */
   let linkSupport: Promise<boolean> | null = null;
 
@@ -165,23 +197,30 @@ export async function dedup(
 
       const sourcePath = path.join(previousSnapshotDir, match.path);
       if (path.resolve(sourcePath) === path.resolve(activePath)) return null;
-      // The exported file is identical to the match and stays as a full copy.
-      if (linkSupport && !(await linkSupport)) return 'copy';
       if (!(await fileExists(sourcePath))) return null;
 
       try {
-        if (!linkSupport) {
-          // First link of the run: it decides for everyone else. A per-file
-          // error says nothing about the filesystem, so it counts as supported.
+        let mode: 'hardlink' | 'copy';
+        if (linkSupport) {
+          // The exported file is identical to the match and stays as a full copy.
+          if (!(await linkSupport)) return 'copy';
+          mode = await replaceWithLink(sourcePath, activePath);
+        } else {
+          // First link of the run: it decides for everyone else. An
+          // "unsupported" result is confirmed with canHardlink before linking
+          // is turned off; any other error is per-file and counts as supported.
           const probe = replaceWithLink(sourcePath, activePath);
-          linkSupport = probe.then(
-            (mode) => mode === 'hardlink',
-            () => true,
-          );
-          return await probe;
+          linkSupport = probe
+            .then(
+              (result) =>
+                result === 'hardlink' || canHardlink(sourcePath, path.dirname(activePath)),
+            )
+            .catch(() => true);
+          mode = await probe;
         }
+        if (mode === 'hardlink') return mode;
         if (!(await linkSupport)) return 'copy';
-        return await replaceWithLink(sourcePath, activePath);
+        throw new Error('The filesystem supports hardlinks, but this file could not be linked.');
       } catch (error) {
         // The exported file is still in place and has the recorded hash, so the
         // snapshot stays correct — only the deduplication is lost.

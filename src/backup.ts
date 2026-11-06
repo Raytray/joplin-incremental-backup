@@ -887,7 +887,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings.push({
         kind: 'storage',
         message:
-          'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+          'Hardlinks are not supported on this filesystem — unchanged files are kept as full copies, so each snapshot consumes the full vault size.',
       });
     }
     if (dedupResult.failed > 0) {
