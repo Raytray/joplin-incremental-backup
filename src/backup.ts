@@ -26,6 +26,7 @@ import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
   getSettings,
+  parseLastBackup,
   requireBackupPath,
   setLastBackup,
   setLastSnapshot,
@@ -207,6 +208,12 @@ export interface BackupOptions {
    * extra `stat` call.
    */
   computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
+  /**
+   * Skip the run if `lastBackup` is later than this time (ms since the epoch)
+   * once the lock is held. Scheduled runs pass the `lastBackup` they saw, so a
+   * backup that finished while they waited to start is not repeated.
+   */
+  skipIfBackedUpAfter?: number;
 }
 
 export interface VerifyResult {
@@ -707,6 +714,17 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
 
   try {
+    if (options.skipIfBackedUpAfter !== undefined) {
+      const latest = parseLastBackup((await getSettings()).lastBackup);
+      if (latest !== null && latest > options.skipIfBackedUpAfter) {
+        logger.info('Another backup finished while this one was starting; skipping.');
+        return {
+          status: 'skipped',
+          message: 'Another backup finished while this one was starting; backup skipped.',
+        };
+      }
+    }
+
     logger.info('Starting backup run...');
     void joplin.views.dialogs
       .showToast({ message: 'Backup started…', type: ToastType.Info })

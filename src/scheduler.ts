@@ -1,8 +1,16 @@
 import joplin from 'api';
 import { logger } from './logger';
 import { resolveBackupRoot, runBackup } from './backup';
-import type { BackupResult } from './backup';
-import { getSettings, hasBackupPath, isSchedulerEnabled, SETTING_KEYS } from './settings';
+import type { BackupOptions, BackupResult } from './backup';
+import {
+  getSettings,
+  hasBackupPath,
+  isSchedulerEnabled,
+  parseLastBackup,
+  SETTING_KEYS,
+} from './settings';
+
+export { parseLastBackup };
 import type { Settings } from './settings';
 import { errorCode } from './platform';
 import { listSnapshots } from './retention';
@@ -29,7 +37,7 @@ export const RETRY_DELAY_MS = 5 * 60 * 1000;
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 /** Runs one scheduled backup; injected in tests. */
-export type BackupRunner = () => Promise<BackupResult>;
+export type BackupRunner = (options?: BackupOptions) => Promise<BackupResult>;
 
 export interface SchedulerDependencies {
   runBackup?: BackupRunner;
@@ -49,14 +57,6 @@ async function directoryHasSnapshots(backupPath: string): Promise<boolean> {
     // Unreadable: treat as empty so a backup runs soon and reports the real error.
     return false;
   }
-}
-
-/** Parse a persisted `lastBackup` timestamp; invalid values mean "never". */
-export function parseLastBackup(value: string | undefined | null): number | null {
-  if (!value) return null;
-  const parsed = Date.parse(value);
-  if (!Number.isFinite(parsed)) return null;
-  return parsed;
 }
 
 /**
@@ -192,7 +192,7 @@ export class Scheduler {
   }
 
   /** Run a backup, skipping if one is already in flight. */
-  async executeScheduledBackup(): Promise<BackupResult | null> {
+  async executeScheduledBackup(options?: BackupOptions): Promise<BackupResult | null> {
     if (this.running) {
       logger.warn('Scheduled backup already in progress; skipping this tick.');
       return null;
@@ -200,7 +200,7 @@ export class Scheduler {
 
     this.running = true;
     try {
-      return await this.runBackup();
+      return await this.runBackup(options);
     } catch (error) {
       if (errorCode(error) === 'EEXIST') {
         logger.warn('Another backup holds the lock; skipping this scheduled run.');
@@ -213,11 +213,43 @@ export class Scheduler {
     }
   }
 
-  /** The timer fired: run a backup and re-arm the next one. */
+  /**
+   * Read the persisted `lastBackup`. `undefined` means it could not be read,
+   * which is different from `null` ("never backed up").
+   */
+  private async readLastBackup(): Promise<number | null | undefined> {
+    try {
+      return parseLastBackup((await this.loadSettings()).lastBackup);
+    } catch (error) {
+      logger.warn(
+        'Could not read the last backup time; running the scheduled backup anyway.',
+        error,
+      );
+      return undefined;
+    }
+  }
+
+  /** The timer fired: run a backup (unless one ran meanwhile) and re-arm the next one. */
   private async tick(generation: number): Promise<void> {
     this.handle = null;
 
-    const result = await this.executeScheduledBackup();
+    // Another backup (e.g. a manual one) may have run since this timer was
+    // armed. If so, the timer is stale: move it to a full interval after that
+    // backup instead of taking a redundant snapshot.
+    const lastBackupMs = await this.readLastBackup();
+    if (generation !== this.generation) return;
+    if (typeof lastBackupMs === 'number' && this.now() < lastBackupMs + this.intervalMs) {
+      this.armAt(lastBackupMs + this.intervalMs);
+      return;
+    }
+
+    // Repeat the check once the lock is held: a backup that was running when
+    // this timer fired may finish while this one waits to start.
+    const result = await this.executeScheduledBackup(
+      lastBackupMs === undefined
+        ? undefined
+        : { skipIfBackedUpAfter: lastBackupMs ?? Number.NEGATIVE_INFINITY },
+    );
 
     // The settings changed while the backup ran: whoever changed them has
     // already re-armed (or paused) the schedule.
@@ -276,15 +308,6 @@ export class Scheduler {
       return;
     }
 
-    await this.reschedule();
-  }
-
-  /**
-   * Re-read the settings and re-arm the timer. Called after a manual backup,
-   * which updates `lastBackup`, so the next automatic run counts a full
-   * interval from it instead of firing at the previously computed time.
-   */
-  async reschedule(): Promise<void> {
     try {
       await this.applySettings(await this.loadSettings());
     } catch (error) {
@@ -309,11 +332,6 @@ const defaultScheduler = createScheduler();
 
 export function stopScheduler(): void {
   defaultScheduler.stop();
-}
-
-/** Re-arm the shared scheduler from the current settings (e.g. after a manual backup). */
-export async function rescheduleScheduler(): Promise<void> {
-  await defaultScheduler.reschedule();
 }
 
 export function isSchedulerRunning(): boolean {

@@ -345,32 +345,6 @@ describe('plugin startup (onStart)', () => {
     expect(await listSnapshotDirs()).toHaveLength(1);
   });
 
-  it('re-arms the automatic schedule after a manual backup', async () => {
-    workspace.setNotes([{ id: 'n1', title: 'Note', updated_time: 100 }]);
-    installMocks();
-    mockState.values[SETTING_KEYS.backupPath] = BACKUP_ROOT;
-    mockState.values[SETTING_KEYS.backupInterval] = 24;
-    // Due in about an hour.
-    mockState.values[SETTING_KEYS.lastBackup] = new Date(
-      Date.now() - 23 * 60 * 60 * 1000,
-    ).toISOString();
-
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-    try {
-      await pluginScript!.onStart!();
-      const before = setTimeoutSpy.mock.calls.length;
-      expect(setTimeoutSpy.mock.calls[before - 1][1]).toBeLessThanOrEqual(60 * 60 * 1000);
-
-      await mockState.registeredCommands[CREATE_COMMAND].execute!();
-
-      const lastDelay = setTimeoutSpy.mock.calls.at(-1)![1] as number;
-      expect(setTimeoutSpy.mock.calls.length).toBeGreaterThan(before);
-      expect(lastDelay).toBeGreaterThan(23 * 60 * 60 * 1000);
-    } finally {
-      setTimeoutSpy.mockRestore();
-    }
-  });
-
   it('shows exporter warnings in the backup dialog', async () => {
     workspace.setNotes([{ id: 'n1', title: 'Note', updated_time: 100 }]);
     installMocks();

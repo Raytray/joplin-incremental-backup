@@ -20,7 +20,7 @@ import {
   Scheduler,
   stopScheduler,
 } from '../src/scheduler';
-import type { BackupResult } from '../src/backup';
+import type { BackupOptions, BackupResult } from '../src/backup';
 import { runBackup } from '../src/backup';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { SETTING_KEYS } from '../src/settings';
@@ -88,6 +88,13 @@ function createManualTimers() {
     },
   };
 }
+
+/** Let pending promise continuations (and the ticks after them) run. */
+const flushEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** Timers that are still armed. */
+const live = (timers: Array<{ cleared: boolean; fired: boolean }>) =>
+  timers.filter((timer) => !timer.cleared && !timer.fired);
 
 beforeEach(() => {
   vol.reset();
@@ -329,6 +336,7 @@ describe('Scheduler tick', () => {
     scheduler.start(24, new Date(NOW - 25 * HOUR_IN_MS).toISOString());
     manual.fire(manual.timers[0]);
     manual.fire(manual.timers[0]);
+    await flushEventLoop();
 
     expect(runBackupFn).toHaveBeenCalledTimes(1);
 
@@ -436,9 +444,10 @@ describe('Scheduler.init and settings changes', () => {
   });
 });
 
-describe('Scheduler.reschedule', () => {
-  it('re-arms a full interval after the lastBackup set by a manual backup', async () => {
+describe('Scheduler — another backup ran since the timer was armed', () => {
+  it('re-arms a full interval after a manual backup instead of running', async () => {
     const manual = createManualTimers();
+    let clock = NOW;
     let lastBackup = new Date(NOW - 23 * HOUR_IN_MS).toISOString();
     const runBackupFn = vi.fn(async () => successResult());
     const scheduler = createScheduler({
@@ -446,32 +455,77 @@ describe('Scheduler.reschedule', () => {
       setTimeoutFn: manual.setTimeoutFn,
       clearTimeoutFn: manual.clearTimeoutFn,
       loadSettings: async () => makeSettings(24, lastBackup),
-      now: () => NOW,
+      now: () => clock,
     });
 
     await scheduler.init();
     // Last backup 23 hours ago on a 24 hour interval → due in 1 hour.
     expect(manual.timers[0].timeout).toBe(HOUR_IN_MS);
 
-    // A manual backup just finished and recorded the current time.
-    lastBackup = new Date(NOW).toISOString();
-    await scheduler.reschedule();
-
-    expect(manual.timers[0].cleared).toBe(true);
-    expect(manual.timers).toHaveLength(2);
-    expect(manual.timers[1].timeout).toBe(24 * HOUR_IN_MS);
-
-    // The stale timer no longer triggers a backup.
+    // A manual backup runs 50 minutes later; the timer fires 10 minutes after it.
+    const manualAt = NOW + 50 * 60 * 1000;
+    lastBackup = new Date(manualAt).toISOString();
+    clock = NOW + HOUR_IN_MS;
     manual.fire(manual.timers[0]);
+    await flushEventLoop();
+
     expect(runBackupFn).not.toHaveBeenCalled();
+    expect(live(manual.timers)).toHaveLength(1);
+    expect(manual.last()!.timeout).toBe(manualAt + 24 * HOUR_IN_MS - clock);
   });
 
-  it('logs instead of throwing when the settings cannot be read', async () => {
-    let fail = false;
+  it('runs when lastBackup is unchanged, passing it on for the post-lock check', async () => {
+    const manual = createManualTimers();
+    const lastBackup = new Date(NOW - 23 * HOUR_IN_MS).toISOString();
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
+    let clock = NOW;
     const scheduler = createScheduler({
-      runBackup: async () => successResult(),
-      setTimeoutFn: createManualTimers().setTimeoutFn,
-      clearTimeoutFn: () => undefined,
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, lastBackup),
+      now: () => clock,
+    });
+
+    await scheduler.init();
+    clock = NOW + HOUR_IN_MS;
+    manual.fire(manual.timers[0]);
+    await flushEventLoop();
+
+    expect(runBackupFn).toHaveBeenCalledTimes(1);
+    expect(runBackupFn.mock.calls[0][0]).toEqual({
+      skipIfBackedUpAfter: Date.parse(lastBackup),
+    });
+  });
+
+  it('passes -Infinity when no backup was ever recorded', async () => {
+    const manual = createManualTimers();
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    manual.fire(manual.timers[0]);
+    await flushEventLoop();
+
+    expect(runBackupFn.mock.calls[0][0]).toEqual({
+      skipIfBackedUpAfter: Number.NEGATIVE_INFINITY,
+    });
+  });
+
+  it('still runs, without the post-lock check, when settings cannot be read', async () => {
+    const manual = createManualTimers();
+    let fail = false;
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
       loadSettings: async () => {
         if (fail) throw new Error('settings unavailable');
         return makeSettings(24);
@@ -481,7 +535,11 @@ describe('Scheduler.reschedule', () => {
 
     await scheduler.init();
     fail = true;
-    await expect(scheduler.reschedule()).resolves.toBeUndefined();
+    manual.fire(manual.timers[0]);
+    await flushEventLoop();
+
+    expect(runBackupFn).toHaveBeenCalledTimes(1);
+    expect(runBackupFn.mock.calls[0][0]).toBeUndefined();
   });
 });
 
@@ -560,12 +618,6 @@ describe('Scheduler — settings change while a backup is running', () => {
     return { runBackup, finish: (result = successResult()) => finish(result) };
   }
 
-  /** Let the finished backup's continuation (and the tick after it) run. */
-  const flushEventLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-  const live = (timers: Array<{ cleared: boolean; fired: boolean }>) =>
-    timers.filter((timer) => !timer.cleared && !timer.fired);
-
   it('stays paused when the directory is cleared mid-backup', async () => {
     const manual = createManualTimers();
     const backup = controlledRun();
@@ -580,6 +632,7 @@ describe('Scheduler — settings change while a backup is running', () => {
 
     await scheduler.init();
     manual.fireAll(); // startup catch-up begins; the backup is now in flight
+    await flushEventLoop();
     expect(backup.runBackup).toHaveBeenCalledTimes(1);
 
     backupPath = '';

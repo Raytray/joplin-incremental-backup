@@ -517,6 +517,43 @@ describe('runBackup — happy path', () => {
   });
 });
 
+describe('runBackup — skipIfBackedUpAfter', () => {
+  const SEEN = Date.parse('2026-01-01T00:00:00.000Z');
+
+  it('skips without touching the result when a newer backup was recorded', async () => {
+    const newer = new Date(SEEN + 60 * 1000).toISOString();
+    setSettings({ [SETTING_KEYS.lastBackup]: newer, [SETTING_KEYS.lastBackupResult]: 'previous' });
+
+    const result = await run({ skipIfBackedUpAfter: SEEN });
+
+    expect(result.status).toBe('skipped');
+    expect(result.snapshotName).toBeUndefined();
+    expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(newer);
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBe('previous');
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    expect(await listStagingDirs(root)).toEqual([]);
+    await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('runs when lastBackup is unchanged', async () => {
+    setSettings({ [SETTING_KEYS.lastBackup]: new Date(SEEN).toISOString() });
+
+    const result = await run({ skipIfBackedUpAfter: SEEN });
+
+    expect(result.status).toBe('success');
+  });
+
+  it('skips when a first backup appeared after "never backed up" was seen', async () => {
+    setSettings({ [SETTING_KEYS.lastBackup]: new Date(SEEN).toISOString() });
+
+    const result = await run({ skipIfBackedUpAfter: Number.NEGATIVE_INFINITY });
+
+    expect(result.status).toBe('skipped');
+  });
+});
+
 describe('runBackup — onlyOnChange', () => {
   it('skips when the fingerprint is unchanged', async () => {
     const first = await run();
