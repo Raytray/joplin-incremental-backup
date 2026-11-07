@@ -294,6 +294,11 @@ export function parseLastBackup(value: string | undefined | null): number | null
   return parsed;
 }
 
+/** Read only the persisted `lastBackup` timestamp (cheaper than `getSettings`). */
+export async function getLastBackup(): Promise<string> {
+  return String((await joplin.settings.value(SETTING_KEYS.lastBackup)) ?? '');
+}
+
 export async function setLastBackup(timestamp: string): Promise<void> {
   await joplin.settings.setValue(SETTING_KEYS.lastBackup, timestamp);
 }

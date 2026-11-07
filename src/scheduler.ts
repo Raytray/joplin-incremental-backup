@@ -9,11 +9,11 @@ import {
   parseLastBackup,
   SETTING_KEYS,
 } from './settings';
-
-export { parseLastBackup };
 import type { Settings } from './settings';
 import { errorCode } from './platform';
 import { listSnapshots } from './retention';
+
+export { parseLastBackup } from './settings';
 
 export const HOUR_IN_MS = 60 * 60 * 1000;
 
@@ -82,6 +82,15 @@ export class Scheduler {
   private generation = 0;
   /** Backup path the current schedule was computed for (`undefined` before init). */
   private appliedPath: string | undefined;
+  /**
+   * The persisted `lastBackup` (ms; `-Infinity` = never) when the timer was
+   * armed. If it has moved when the timer fires, another backup ran meanwhile
+   * and the timer is stale. Comparing for a change, rather than against the
+   * clock, keeps a deliberately ignored `lastBackup` (new directory) or a
+   * future timestamp (clock corrected backwards) from suppressing the run.
+   * `undefined` means it could not be read, so no run is skipped.
+   */
+  private observedLastBackup: number | undefined;
 
   private readonly runBackup: BackupRunner;
   private readonly setTimeoutFn: NonNullable<SchedulerDependencies['setTimeoutFn']>;
@@ -145,8 +154,14 @@ export class Scheduler {
    *  - overdue by ≥ 1 interval     → run at the next interval boundary
    *  - otherwise                  → run when the interval elapses
    */
-  start(intervalHours: number, lastBackupIso?: string): void {
+  start(
+    intervalHours: number,
+    lastBackupIso?: string,
+    /** The persisted `lastBackup`, when `lastBackupIso` deliberately differs from it. */
+    observedLastBackupIso = lastBackupIso,
+  ): void {
     this.stop();
+    this.observedLastBackup = parseLastBackup(observedLastBackupIso) ?? Number.NEGATIVE_INFINITY;
 
     if (!isSchedulerEnabled(intervalHours)) {
       this.intervalMs = 0;
@@ -214,17 +229,14 @@ export class Scheduler {
   }
 
   /**
-   * Read the persisted `lastBackup`. `undefined` means it could not be read,
-   * which is different from `null` ("never backed up").
+   * Read the persisted `lastBackup` (ms; `-Infinity` = never), or `undefined`
+   * if it could not be read.
    */
-  private async readLastBackup(): Promise<number | null | undefined> {
+  private async readLastBackup(): Promise<number | undefined> {
     try {
-      return parseLastBackup((await this.loadSettings()).lastBackup);
+      return parseLastBackup((await this.loadSettings()).lastBackup) ?? Number.NEGATIVE_INFINITY;
     } catch (error) {
-      logger.warn(
-        'Could not read the last backup time; running the scheduled backup anyway.',
-        error,
-      );
+      logger.warn('Could not read the last backup time.', error);
       return undefined;
     }
   }
@@ -236,29 +248,40 @@ export class Scheduler {
     // Another backup (e.g. a manual one) may have run since this timer was
     // armed. If so, the timer is stale: move it to a full interval after that
     // backup instead of taking a redundant snapshot.
-    const lastBackupMs = await this.readLastBackup();
+    const observed = this.observedLastBackup;
+    const latest = await this.readLastBackup();
     if (generation !== this.generation) return;
-    if (typeof lastBackupMs === 'number' && this.now() < lastBackupMs + this.intervalMs) {
-      this.armAt(lastBackupMs + this.intervalMs);
+    if (observed !== undefined && latest !== undefined && latest > observed) {
+      this.observedLastBackup = latest;
+      this.armAt(latest + this.intervalMs);
       return;
     }
 
     // Repeat the check once the lock is held: a backup that was running when
     // this timer fired may finish while this one waits to start.
     const result = await this.executeScheduledBackup(
-      lastBackupMs === undefined
-        ? undefined
-        : { skipIfBackedUpAfter: lastBackupMs ?? Number.NEGATIVE_INFINITY },
+      observed === undefined ? undefined : { skipIfBackedUpAfter: observed },
     );
 
     // The settings changed while the backup ran: whoever changed them has
     // already re-armed (or paused) the schedule.
     if (generation !== this.generation) return;
 
+    // This run (or the one that superseded it) moved `lastBackup`; take the
+    // new value as the baseline so the next tick does not mistake it for
+    // another backup.
+    this.observedLastBackup = await this.readLastBackup();
+    if (generation !== this.generation) return;
+
     if (result === null) {
       // The run failed (or was skipped because another one was in flight).
       // Retry much sooner than a full interval would.
       this.armAt(this.now() + RETRY_DELAY_MS);
+      return;
+    }
+
+    if (result.supersededBy !== undefined) {
+      this.armAt(result.supersededBy + this.intervalMs);
       return;
     }
 
@@ -287,7 +310,7 @@ export class Scheduler {
     const pathChanged = previousPath !== undefined && previousPath !== settings.backupPath;
     if (pathChanged && !(await this.hasSnapshots(settings.backupPath))) {
       logger.info('Backup directory changed to one with no snapshots; scheduling a backup soon.');
-      this.start(settings.backupInterval, undefined);
+      this.start(settings.backupInterval, undefined, settings.lastBackup);
       return;
     }
 

@@ -683,6 +683,7 @@ describe('runBackup — skipIfBackedUpAfter', () => {
     const result = await run({ skipIfBackedUpAfter: SEEN });
 
     expect(result.status).toBe('skipped');
+    expect(result.supersededBy).toBe(SEEN + 60 * 1000);
     expect(result.snapshotName).toBeUndefined();
     expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(newer);
     expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBe('previous');
@@ -691,6 +692,31 @@ describe('runBackup — skipIfBackedUpAfter', () => {
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({
       code: 'ENOENT',
     });
+  });
+
+  it('skips instead of recording a setup failure when a newer backup was recorded', async () => {
+    setSettings({
+      [SETTING_KEYS.lastBackup]: new Date(SEEN + 60 * 1000).toISOString(),
+      [SETTING_KEYS.lastBackupResult]: 'previous',
+    });
+
+    const result = await run({
+      skipIfBackedUpAfter: SEEN,
+      minFreeBytes: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBe('previous');
+  });
+
+  it('still records a setup failure when no newer backup was recorded', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    setSettings({ [SETTING_KEYS.lastBackup]: new Date(SEEN).toISOString() });
+
+    await expect(
+      run({ skipIfBackedUpAfter: SEEN, minFreeBytes: Number.MAX_SAFE_INTEGER }),
+    ).rejects.toThrow(/Not enough free disk space/);
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/failed/);
   });
 
   it('runs when lastBackup is unchanged', async () => {

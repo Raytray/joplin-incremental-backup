@@ -519,7 +519,7 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     });
   });
 
-  it('still runs, without the post-lock check, when settings cannot be read', async () => {
+  it('still runs, keeping the armed baseline, when settings cannot be read', async () => {
     const manual = createManualTimers();
     let fail = false;
     const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
@@ -540,7 +540,88 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     await flushEventLoop();
 
     expect(runBackupFn).toHaveBeenCalledTimes(1);
-    expect(runBackupFn.mock.calls[0][0]).toBeUndefined();
+    expect(runBackupFn.mock.calls[0][0]).toEqual({
+      skipIfBackedUpAfter: Number.NEGATIVE_INFINITY,
+    });
+  });
+
+  it('does not mistake its own successful run for another backup', async () => {
+    const manual = createManualTimers();
+    let clock = NOW;
+    let lastBackup = new Date(NOW - 25 * HOUR_IN_MS).toISOString();
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => {
+      lastBackup = new Date(clock).toISOString();
+      return successResult();
+    });
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, lastBackup),
+      now: () => clock,
+    });
+
+    await scheduler.init();
+    manual.fire(manual.last()!);
+    await flushEventLoop();
+    expect(runBackupFn).toHaveBeenCalledTimes(1);
+
+    clock += 24 * HOUR_IN_MS;
+    manual.fire(manual.last()!);
+    await flushEventLoop();
+
+    expect(runBackupFn).toHaveBeenCalledTimes(2);
+    expect(runBackupFn.mock.calls[1][0]).toEqual({ skipIfBackedUpAfter: NOW });
+  });
+
+  it('runs when lastBackup is in the future (clock corrected backwards)', async () => {
+    const manual = createManualTimers();
+    const future = new Date(NOW + 2 * 24 * HOUR_IN_MS).toISOString();
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
+    let clock = NOW;
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, future),
+      now: () => clock,
+    });
+
+    // Armed for lastBackup + interval; the clock never gets there in this
+    // test, but a timer that does fire must not be pushed out again.
+    scheduler.start(24, future);
+    clock = NOW + HOUR_IN_MS;
+    manual.fire(manual.last()!);
+    await flushEventLoop();
+
+    expect(runBackupFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-arms from the superseding backup when the post-lock check skips', async () => {
+    const manual = createManualTimers();
+    const manualAt = NOW + 50 * 60 * 1000;
+    let lastBackup = new Date(NOW - 23 * HOUR_IN_MS).toISOString();
+    let clock = NOW;
+    const scheduler = createScheduler({
+      runBackup: async () => {
+        // A manual backup finished while this run waited for the lock.
+        lastBackup = new Date(manualAt).toISOString();
+        clock = manualAt + 5 * 60 * 1000;
+        return { status: 'skipped', message: 'superseded', supersededBy: manualAt };
+      },
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, lastBackup),
+      now: () => clock,
+    });
+
+    await scheduler.init();
+    clock = NOW + HOUR_IN_MS;
+    manual.fire(manual.last()!);
+    await flushEventLoop();
+
+    expect(live(manual.timers)).toHaveLength(1);
+    expect(manual.last()!.timeout).toBe(manualAt + 24 * HOUR_IN_MS - clock);
   });
 });
 
@@ -692,6 +773,29 @@ describe('Scheduler — backup directory changes', () => {
     await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
 
     expect(manual.last()!.timeout).toBe(CATCH_UP_GRACE_MS);
+  });
+
+  it('runs the catch-up backup for the new directory when its timer fires', async () => {
+    const manual = createManualTimers();
+    let backupPath = '/old';
+    const runBackupFn = vi.fn(async (_options?: BackupOptions) => successResult());
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, recent(), backupPath),
+      now: () => NOW,
+      hasSnapshots: async () => false,
+    });
+
+    await scheduler.init();
+    backupPath = '/new';
+    await scheduler.handleSettingsChange([SETTING_KEYS.backupPath]);
+    manual.fire(manual.last()!);
+    await flushEventLoop();
+
+    // The old directory's recent lastBackup must not cancel the catch-up.
+    expect(runBackupFn).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the regular schedule when the new directory already has snapshots', async () => {
