@@ -11,6 +11,11 @@
  *   3. Back-date `lastBackup` → catch-up backup → second snapshot, which
  *      hardlinks the files that did not change.
  *   4. Back-date again with nothing changed → the run is skipped.
+ *   5. Tag an existing note (nothing else) → the change is detected.
+ *   6. Lower retention to 2 → the next snapshot prunes the two oldest,
+ *      without damaging the hardlinked files the survivors share with them.
+ *   7. Move the backup directory away (an unmounted drive) → the run is
+ *      refused and the directory is not recreated.
  *
  * The scenario runs twice: staging the export on the backup drive (the
  * default), and with "Stage the export on this computer" on, with the backups
@@ -87,6 +92,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     changes?: BackupChanges;
     warnings?: string[];
     message?: string;
+    /** Set on failed runs instead of `message`. */
+    error?: string;
   }
 
   function lastRunRecord(): RunRecord {
@@ -98,7 +105,9 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
    * Settings reach the database 500 ms after the plugin sets them, so the
    * read-only poll sees the run finish without stopping the app.
    */
-  async function launchAndAwaitBackup(expectedStatus: 'success' | 'skipped'): Promise<RunRecord> {
+  async function launchAndAwaitBackup(
+    expectedStatus: 'success' | 'skipped' | 'failed',
+  ): Promise<RunRecord> {
     const before = joplin.readPluginSetting('lastBackupResultJson') ?? '';
     await joplin.start();
     await waitFor(
@@ -118,8 +127,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
       BACKUP_TIMEOUT_MS,
     );
     const record = lastRunRecord();
-    expect(record.status, record.message).toBe(expectedStatus);
-    expect(record.warnings ?? []).toEqual([]);
+    expect(record.status, record.message ?? record.error).toBe(expectedStatus);
+    if (expectedStatus !== 'failed') expect(record.warnings ?? []).toEqual([]);
     return record;
   }
 
@@ -397,5 +406,81 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
 
     expect(await snapshotNames()).toEqual(snapshots);
     expect(joplin.readPluginSetting('lastBackupResult')).toMatch(/^Skipped \(no changes\)/);
+  });
+
+  it('detects a tag-only change', async () => {
+    // The skipped run just recorded `lastBackup`, so this launch does not back up.
+    const before = joplin.readPluginSetting('lastBackupResultJson');
+    await joplin.start();
+    await joplin.tagNote(ids.tag, ids.editedNote);
+    await joplin.stop();
+    expect(joplin.readPluginSetting('lastBackupResultJson')).toBe(before);
+    expect(await snapshotNames()).toEqual(snapshots);
+
+    backdateLastBackup();
+    const { changes, snapshotName } = await launchAndAwaitBackup('success');
+    // Change the vault for the retention step while the app is up.
+    await joplin.updateNote(ids.addedNote, { body: 'Brand new, edited.' });
+    await joplin.stop();
+
+    const names = await snapshotNames();
+    expect(names).toEqual([...snapshots, snapshotName]);
+    snapshots.push(snapshotName!);
+
+    // The only new file is the note↔tag link; no note changed.
+    expect(changes?.deleted).toEqual([]);
+    expect(changes?.modified.filter((p) => !p.startsWith('resources/'))).not.toContain(
+      `${ids.editedNote}.md`,
+    );
+    const linkFiles: string[] = [];
+    for (const rel of changes?.added ?? []) {
+      const text = await fs.readFile(path.join(backupDir, snapshotName!, rel), 'utf8');
+      if (text.includes(`note_id: ${ids.editedNote}`) && text.includes(`tag_id: ${ids.tag}`)) {
+        linkFiles.push(rel);
+      }
+    }
+    expect(linkFiles, `added: ${changes?.added.join(', ')}`).toHaveLength(1);
+  });
+
+  it('prunes old snapshots without damaging the ones it keeps', async () => {
+    joplin.writePluginSettings({ backupRetention: 2 });
+    backdateLastBackup();
+    const { snapshotName } = await launchAndAwaitBackup('success');
+    await joplin.stop();
+
+    const kept = [snapshots[snapshots.length - 1], snapshotName!];
+    expect(await snapshotNames()).toEqual(kept);
+    expect((await fs.readFile(path.join(backupDir, 'latest.txt'), 'utf8')).trim()).toBe(kept[1]);
+    snapshots.splice(0, snapshots.length, ...kept);
+
+    // The survivors shared hardlinks with the pruned snapshots; every file
+    // must still be present and intact.
+    for (const snapshot of kept) {
+      const manifest = await readManifest(snapshot);
+      for (const file of manifest.files) {
+        const data = await fs.readFile(path.join(backupDir, snapshot, file.path));
+        expect(sha256(data), `${snapshot}/${file.path}`).toBe(file.sha256);
+      }
+    }
+    const unchanged = `${ids.unchangedNote}.md`;
+    const [a, b] = await Promise.all(kept.map((s) => fs.stat(path.join(backupDir, s, unchanged))));
+    expect(b.ino, `${unchanged} still hardlinked between the survivors`).toBe(a.ino);
+  });
+
+  it('refuses to back up when the backup drive is missing', async () => {
+    // What an unmounted drive looks like: the configured directory is gone.
+    const unmounted = `${backupDir}.unmounted`;
+    await fs.rename(backupDir, unmounted);
+    backdateLastBackup();
+    const record = await launchAndAwaitBackup('failed');
+    await joplin.stop();
+
+    expect(record.error).toContain('is not available');
+    expect(record.error).toContain('.joplin-incremental-backup');
+    expect(await exists(backupDir), 'backup directory must not be recreated').toBe(false);
+
+    // The real backups are untouched.
+    await fs.rename(unmounted, backupDir);
+    expect(await snapshotNames()).toEqual(snapshots);
   });
 });
