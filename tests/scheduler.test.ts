@@ -436,6 +436,55 @@ describe('Scheduler.init and settings changes', () => {
   });
 });
 
+describe('Scheduler.reschedule', () => {
+  it('re-arms a full interval after the lastBackup set by a manual backup', async () => {
+    const manual = createManualTimers();
+    let lastBackup = new Date(NOW - 23 * HOUR_IN_MS).toISOString();
+    const runBackupFn = vi.fn(async () => successResult());
+    const scheduler = createScheduler({
+      runBackup: runBackupFn,
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(24, lastBackup),
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    // Last backup 23 hours ago on a 24 hour interval → due in 1 hour.
+    expect(manual.timers[0].timeout).toBe(HOUR_IN_MS);
+
+    // A manual backup just finished and recorded the current time.
+    lastBackup = new Date(NOW).toISOString();
+    await scheduler.reschedule();
+
+    expect(manual.timers[0].cleared).toBe(true);
+    expect(manual.timers).toHaveLength(2);
+    expect(manual.timers[1].timeout).toBe(24 * HOUR_IN_MS);
+
+    // The stale timer no longer triggers a backup.
+    manual.fire(manual.timers[0]);
+    expect(runBackupFn).not.toHaveBeenCalled();
+  });
+
+  it('logs instead of throwing when the settings cannot be read', async () => {
+    let fail = false;
+    const scheduler = createScheduler({
+      runBackup: async () => successResult(),
+      setTimeoutFn: createManualTimers().setTimeoutFn,
+      clearTimeoutFn: () => undefined,
+      loadSettings: async () => {
+        if (fail) throw new Error('settings unavailable');
+        return makeSettings(24);
+      },
+      now: () => NOW,
+    });
+
+    await scheduler.init();
+    fail = true;
+    await expect(scheduler.reschedule()).resolves.toBeUndefined();
+  });
+});
+
 describe('Scheduler without a backup directory', () => {
   it('does not arm a timer at startup when no backup directory is set', async () => {
     const manual = createManualTimers();

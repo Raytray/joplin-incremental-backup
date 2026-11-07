@@ -276,6 +276,15 @@ export class Scheduler {
       return;
     }
 
+    await this.reschedule();
+  }
+
+  /**
+   * Re-read the settings and re-arm the timer. Called after a manual backup,
+   * which updates `lastBackup`, so the next automatic run counts a full
+   * interval from it instead of firing at the previously computed time.
+   */
+  async reschedule(): Promise<void> {
     try {
       await this.applySettings(await this.loadSettings());
     } catch (error) {
@@ -300,6 +309,11 @@ const defaultScheduler = createScheduler();
 
 export function stopScheduler(): void {
   defaultScheduler.stop();
+}
+
+/** Re-arm the shared scheduler from the current settings (e.g. after a manual backup). */
+export async function rescheduleScheduler(): Promise<void> {
+  await defaultScheduler.reschedule();
 }
 
 export function isSchedulerRunning(): boolean {

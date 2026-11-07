@@ -4,7 +4,7 @@ import type { MenuItem } from 'api/types';
 import { logger } from './logger';
 import { runBackup, verifyBackup, recoverBackupDirs } from './backup';
 import { registerSettings, getSettings } from './settings';
-import { initScheduler } from './scheduler';
+import { initScheduler, rescheduleScheduler } from './scheduler';
 
 export const CREATE_COMMAND = 'CreateIncrementalBackup';
 export const VERIFY_COMMAND = 'VerifyIncrementalBackup';
@@ -14,6 +14,8 @@ export const MENU_ID = 'incrementalBackup.toolsMenu';
 export async function handleCreateBackup(): Promise<void> {
   try {
     const result = await runBackup();
+    // The run updated `lastBackup`; count the next automatic one from it.
+    await rescheduleScheduler();
     if (result.status === 'skipped') {
       await joplin.views.dialogs.showMessageBox(result.message);
       return;
