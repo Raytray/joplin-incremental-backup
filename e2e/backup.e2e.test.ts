@@ -21,22 +21,22 @@
  * default), and with "Stage the export on this computer" on, with the backups
  * on a different filesystem so local staging is not skipped.
  */
-import { createHash } from 'crypto';
 import fs from 'fs/promises';
-import os from 'os';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { BackupChanges } from '../src/backup';
-import type { Manifest } from '../src/manifest';
 import { listSnapshots } from '../src/retention';
-import { JoplinInstance, waitFor } from './joplin';
+import {
+  backdateLastBackup as backdate,
+  exists,
+  expectSnapshotIntact as expectIntact,
+  inode as inodeIn,
+  launchAndAwaitBackup as launchAndAwait,
+  makeWorkDir,
+  readLatest as readLatestIn,
+  removeWorkDir,
+} from './helpers';
+import { JoplinInstance } from './joplin';
 
-const BACKUP_TIMEOUT_MS = 120_000;
-/**
- * `ACTIVE_DIR_PREFIX` from src/backup.ts, which cannot be loaded here: it
- * imports the Joplin plugin API, which only exists inside Joplin.
- */
-const ACTIVE_DIR_PREFIX = '_joplin_active_';
 /** A directory on a different filesystem from the work directory (tmpfs). */
 const OTHER_DEVICE_ROOT = process.env.JOPLIN_E2E_OTHER_DEVICE ?? '/dev/shm';
 
@@ -44,7 +44,6 @@ const MODES = [
   { name: 'staging on the backup drive', slug: 'drive', stageLocally: false },
   { name: 'staging locally', slug: 'local', stageLocally: true },
 ] as const;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const ATTACHMENT = Buffer.from(`attachment bytes ${Date.now()}\n`.repeat(64));
 
 describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
@@ -68,86 +67,13 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
 
   const snapshots: string[] = [];
 
-  function sha256(data: Buffer): string {
-    return createHash('sha256').update(data).digest('hex');
-  }
-
-  async function snapshotNames(): Promise<string[]> {
-    return listSnapshots(backupDir);
-  }
-
-  /**
-   * Parsed independently of the plugin's own reader, so the test checks the
-   * on-disk format rather than trusting the code under test.
-   */
-  async function readManifest(snapshot: string): Promise<Manifest> {
-    return JSON.parse(
-      await fs.readFile(path.join(backupDir, snapshot, 'manifest.json'), 'utf8'),
-    ) as Manifest;
-  }
-
-  interface RunRecord {
-    status?: string;
-    snapshotName?: string;
-    changes?: BackupChanges;
-    warnings?: string[];
-    message?: string;
-    /** Set on failed runs instead of `message`. */
-    error?: string;
-  }
-
-  function lastRunRecord(): RunRecord {
-    return JSON.parse(joplin.readPluginSetting('lastBackupResultJson') || '{}') as RunRecord;
-  }
-
-  /**
-   * Launch Joplin and wait for the scheduled run to record a new result.
-   * Settings reach the database 500 ms after the plugin sets them, so the
-   * read-only poll sees the run finish without stopping the app.
-   */
-  async function launchAndAwaitBackup(
-    expectedStatus: 'success' | 'skipped' | 'failed',
-  ): Promise<RunRecord> {
-    const before = joplin.readPluginSetting('lastBackupResultJson') ?? '';
-    await joplin.start();
-    await waitFor(
-      'the scheduled backup to finish',
-      () => {
-        const now = joplin.readPluginSetting('lastBackupResultJson') ?? '';
-        return now !== before && now !== '' ? true : undefined;
-      },
-      BACKUP_TIMEOUT_MS,
-    );
-    // After recording the result the run releases the lock, then removes its
-    // staging directories. Wait for all of it, or stopping the app could cut
-    // the cleanup short.
-    await waitFor(
-      'the backup run to clean up',
-      async () => ((await runIsCleanedUp()) ? true : undefined),
-      BACKUP_TIMEOUT_MS,
-    );
-    const record = lastRunRecord();
-    expect(record.status, record.message ?? record.error).toBe(expectedStatus);
-    expect(record.warnings ?? []).toEqual([]);
-    return record;
-  }
-
-  async function runIsCleanedUp(): Promise<boolean> {
-    if (await exists(path.join(backupDir, '.backup.lock'))) return false;
-    const onDrive = await fs.readdir(backupDir).catch(() => [] as string[]);
-    if (onDrive.some((name) => name.startsWith(ACTIVE_DIR_PREFIX))) return false;
-    const local = await fs.readdir(joplin.localStagingRoot).catch(() => [] as string[]);
-    return local.length === 0;
-  }
-
-  async function exists(p: string): Promise<boolean> {
-    try {
-      await fs.access(p);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  const snapshotNames = () => listSnapshots(backupDir);
+  const launchAndAwaitBackup = (expectedStatus: 'success' | 'skipped' | 'failed') =>
+    launchAndAwait(joplin, backupDir, expectedStatus);
+  const backdateLastBackup = () => backdate(joplin);
+  const readLatest = () => readLatestIn(backupDir);
+  const expectSnapshotIntact = (snapshot: string) => expectIntact(backupDir, snapshot);
+  const inode = (snapshot: string, rel: string) => inodeIn(backupDir, snapshot, rel);
 
   /**
    * Where the last run exported, from the plugin's log: locally (and cleaned up
@@ -172,33 +98,6 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     expect(await exists(local[0]), 'local staging directory is removed').toBe(false);
   }
 
-  /** Back-date `lastBackup` so the next launch runs a catch-up backup; returns the value. */
-  function backdateLastBackup(): string {
-    const lastBackup = new Date(Date.now() - 3 * DAY_MS).toISOString();
-    joplin.writePluginSettings({ lastBackup });
-    return lastBackup;
-  }
-
-  async function readLatest(): Promise<string> {
-    return (await fs.readFile(path.join(backupDir, 'latest.txt'), 'utf8')).trim();
-  }
-
-  /** Every file the snapshot's manifest lists is present with its size and hash. */
-  async function expectSnapshotIntact(snapshot: string): Promise<Manifest> {
-    const manifest = await readManifest(snapshot);
-    expect(manifest.fileCount).toBe(manifest.files.length);
-    for (const file of manifest.files) {
-      const data = await fs.readFile(path.join(backupDir, snapshot, file.path));
-      expect(data.length, `${snapshot}/${file.path}`).toBe(file.size);
-      expect(sha256(data), `${snapshot}/${file.path}`).toBe(file.sha256);
-    }
-    return manifest;
-  }
-
-  async function inode(snapshot: string, rel: string): Promise<number> {
-    return (await fs.stat(path.join(backupDir, snapshot, rel))).ino;
-  }
-
   beforeAll(async () => {
     try {
       await setUp();
@@ -209,16 +108,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   });
 
   async function setUp(): Promise<void> {
-    const root = process.env.JOPLIN_E2E_WORKDIR;
-    if (root) {
-      workDir = path.resolve(root, mode.slug);
-      await fs.rm(workDir, { recursive: true, force: true });
-      await fs.mkdir(workDir, { recursive: true });
-    } else {
-      workDir = await fs.mkdtemp(path.join(os.tmpdir(), `joplin-e2e-${mode.slug}-`));
-    }
-    // The plugin logs real paths; compare like with like (macOS /var → /private/var).
-    workDir = await fs.realpath(workDir);
+    workDir = await makeWorkDir(mode.slug);
     joplin = new JoplinInstance(workDir);
 
     if (mode.stageLocally) {
@@ -252,16 +142,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   });
 
   async function cleanUp(): Promise<void> {
-    if (failed || process.env.JOPLIN_E2E_KEEP) {
-      if (workDir) console.log(`Kept e2e work directory: ${workDir} (backups: ${backupDir})`);
-      return;
-    }
-    if (backupParent && backupParent !== workDir) {
-      await fs.rm(backupParent, { recursive: true, force: true });
-    }
-    if (workDir && !process.env.JOPLIN_E2E_WORKDIR) {
-      await fs.rm(workDir, { recursive: true, force: true });
-    }
+    const otherDevice = backupParent && backupParent !== workDir ? [backupParent] : [];
+    await removeWorkDir(workDir, failed, otherDevice);
   }
 
   // Steps build on each other; stop at the first failure.

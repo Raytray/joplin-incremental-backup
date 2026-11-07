@@ -319,6 +319,15 @@ export class JoplinInstance {
     return this.api('PUT', `notes/${id}`, props);
   }
 
+  updateFolder(id: string, props: Record<string, unknown>): Promise<JoplinApiItem> {
+    return this.api('PUT', `folders/${id}`, props);
+  }
+
+  /** Move a note to the trash, from where it can still be restored. */
+  trashNote(id: string): Promise<unknown> {
+    return this.api('DELETE', `notes/${id}`);
+  }
+
   deleteNotePermanently(id: string): Promise<unknown> {
     return this.api('DELETE', `notes/${id}`, undefined, { permanent: '1' });
   }
