@@ -126,6 +126,20 @@ npm run format:check  # check formatting (CI)
 npm run updateVersion # sync version from package.json into the manifest
 ```
 
+### End-to-end tests
+
+`e2e/` runs the built plugin inside a real Joplin desktop app with a throwaway profile. The tests add notes through Joplin's Data API, let the scheduler take the backups, and check the snapshots on disk (Raw layout, manifest hashes, hardlinks between snapshots, change summary, skipped runs). The scenario runs twice: once staging on the backup drive, and once with **Stage the export on this computer** on. For the second run the backups go on another filesystem (`/dev/shm` by default, override with `JOPLIN_E2E_OTHER_DEVICE`), since local staging is skipped when both are on the same disk.
+
+```bash
+npm run fetch-joplin          # download + verify + extract Joplin (default 3.7.22) into .cache/joplin/
+npm run test:e2e              # builds the plugin, then runs e2e/ in a visible Joplin window
+npm run test:e2e:headless     # same, on a virtual display (as in CI); needs xvfb
+```
+
+For headless runs, install Xvfb first (`sudo apt-get install xvfb`). The harness unsets `WAYLAND_DISPLAY` for Joplin, so on WSLg or a Wayland desktop no window appears.
+
+Set `JOPLIN_BIN` to use a different Joplin executable, `JOPLIN_E2E_WORKDIR` to choose where the profile, logs and backups go, and `JOPLIN_E2E_KEEP=1` to keep them after a passing run. They are always kept when a test fails. The tests never touch your own Joplin profile, and they run alongside a Joplin you already have open.
+
 For information on publishing the plugin, see [GENERATOR_DOC.md](./GENERATOR_DOC.md).
 
 ## License

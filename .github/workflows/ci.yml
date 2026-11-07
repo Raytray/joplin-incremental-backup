@@ -54,3 +54,64 @@ jobs:
           path: coverage/
           if-no-files-found: warn
           retention-days: 14
+
+  e2e:
+    name: End-to-end (Joplin ${{ matrix.joplin }})
+    # Pinned: the apt package names below are for 24.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        joplin: ['3.7.22']
+
+    env:
+      JOPLIN_VERSION: ${{ matrix.joplin }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb libasound2t64 libgbm1 libgtk-3-0t64 libnss3 libxss1
+
+      # Installing also builds the plugin into dist/ (prepare runs npm run dist).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache Joplin
+        uses: actions/cache@v4
+        with:
+          path: .cache/joplin/${{ matrix.joplin }}
+          key: joplin-${{ runner.os }}-${{ matrix.joplin }}-${{ hashFiles('scripts/fetch-joplin.sh') }}
+
+      - name: Fetch Joplin
+        run: scripts/fetch-joplin.sh
+
+      # Call vitest directly: npm ci already built dist/, so skip pretest:e2e.
+      - name: Run end-to-end tests
+        run: xvfb-run -a npx vitest run --config vitest.e2e.config.ts
+        env:
+          JOPLIN_E2E_WORKDIR: ${{ runner.temp }}/joplin-e2e
+
+      - name: Upload Joplin logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-joplin-${{ matrix.joplin }}
+          path: |
+            ${{ runner.temp }}/joplin-e2e/*/*.log
+            ${{ runner.temp }}/joplin-e2e/*/profile/log*.txt
+            ${{ runner.temp }}/joplin-e2e/*/backups/**/manifest.json
+          if-no-files-found: warn
+          retention-days: 14
