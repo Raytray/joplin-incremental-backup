@@ -1340,13 +1340,76 @@ describe('runBackup — local staging', () => {
       .map((command) => String(command.args[2]));
   }
 
+  /**
+   * memfs reports one device for every path. Put the local staging root on
+   * another one, as on a machine whose backup drive is a separate disk.
+   */
+  function putLocalRootOnOwnDevice(): void {
+    const realStat = fs.stat.bind(fs) as (target: string) => Promise<{ dev: number }>;
+    vi.spyOn(fs, 'stat').mockImplementation((async (target: string) => {
+      const stats = await realStat(target);
+      if (path.resolve(String(target)) === LOCAL_ROOT) stats.dev = Number(stats.dev) + 1;
+      return stats;
+    }) as unknown as typeof fs.stat);
+  }
+
   beforeEach(() => {
     setSettings({ [SETTING_KEYS.stageLocally]: true, [SETTING_KEYS.onlyOnChange]: false });
+    putLocalRootOnOwnDevice();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
+
+  it('stages on the backup drive, without a warning, when both are on the same disk', async () => {
+    vi.restoreAllMocks();
+    const warn = vi.spyOn(logger, 'warn');
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(false);
+    expect(path.dirname(exportTargets()[0])).toBe(SNAPSHOT_ROOT);
+    expect(result.warnings).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the backup drive, with a warning, when the local export fails', async () => {
+    const writeFile = stubExportThatFailsUnder(LOCAL_ROOT);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const result = await run();
+
+    expect(writeFile).toHaveBeenCalled();
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(false);
+    expect(exportTargets().map((target) => path.dirname(target))).toEqual([
+      LOCAL_ROOT,
+      SNAPSHOT_ROOT,
+    ]);
+    expect(result.warnings).toEqual([expect.stringContaining('disk full')]);
+    expect(await fs.readFile(path.join(result.snapshotDir!, 'n1.md'), 'utf8')).toBe('hello');
+    expect(await fs.readdir(LOCAL_ROOT)).toEqual([]);
+  });
+
+  /** An export that fails with ENOSPC when written under `root`. */
+  function stubExportThatFailsUnder(root: string) {
+    const attempt = vi.fn();
+    mockState.commandHandlers.exportFolders = async (
+      _ids: unknown,
+      _format: unknown,
+      target: unknown,
+    ) => {
+      const dir = String(target);
+      if (dir.startsWith(root)) {
+        attempt();
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      }
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
+    };
+    return attempt;
+  }
 
   it('exports into the plugin data directory and writes the snapshot to the backup drive', async () => {
     const result = await run();

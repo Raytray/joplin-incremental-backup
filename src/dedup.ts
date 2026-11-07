@@ -251,6 +251,16 @@ function countModes(
   return { hardlinked, copied, unchanged, failed };
 }
 
+/** Create `targetDir` and a copy of every directory under `sourceDir` in it, without files. */
+async function mirrorDirectories(sourceDir: string, targetDir: string): Promise<void> {
+  await fs.mkdir(targetDir, { recursive: true });
+  for (const entry of await fs.readdir(sourceDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      await mirrorDirectories(path.join(sourceDir, entry.name), path.join(targetDir, entry.name));
+    }
+  }
+}
+
 /**
  * Build `targetDir` from an export staged in `localDir`: each file identical
  * to one in the previous snapshot is hardlinked to it, and every other file is
@@ -275,9 +285,10 @@ export async function stageFromLocal(
   /** Settled by the first link attempt of the run, as in `dedup`. */
   let linkSupport: Promise<boolean> | null = null;
 
-  const subdirs = new Set(files.map((file) => path.dirname(path.join(targetDir, file))));
-  await fs.mkdir(targetDir, { recursive: true });
-  for (const dir of [...subdirs].sort()) await fs.mkdir(dir, { recursive: true });
+  // Mirror every directory of the export, empty ones included (the RAW
+  // exporter always creates `resources/`), so the snapshot has the same layout
+  // as one staged on the backup drive.
+  await mirrorDirectories(localDir, targetDir);
 
   const modes = await mapWithConcurrency(
     files,

@@ -486,6 +486,18 @@ describe('stageFromLocal', () => {
     expect(await fs.readFile(path.join(TARGET, 'resources/r1'), 'utf8')).toBe('attachment');
   });
 
+  it('keeps empty directories of the export, such as resources/', async () => {
+    await writeFiles(LOCAL, [{ path: 'a.md', content: 'a' }]);
+    await fs.mkdir(path.join(LOCAL, 'resources'));
+    await fs.mkdir(path.join(LOCAL, 'nested/empty'), { recursive: true });
+
+    await stageFromLocal(LOCAL, TARGET, null, null, ['a.md']);
+
+    expect((await fs.readdir(TARGET)).sort()).toEqual(['a.md', 'nested', 'resources']);
+    expect(await fs.readdir(path.join(TARGET, 'resources'))).toEqual([]);
+    expect(await fs.readdir(path.join(TARGET, 'nested'))).toEqual(['empty']);
+  });
+
   it('copies everything when there is no previous snapshot', async () => {
     await writeFiles(LOCAL, [{ path: 'a.md', content: 'a' }]);
 

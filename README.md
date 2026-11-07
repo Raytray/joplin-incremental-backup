@@ -72,7 +72,7 @@ With **Stage the export on this computer** on, a run instead:
 2. Builds the staging directory on the backup drive by hardlinking files that are identical to the previous snapshot and copying only new or changed files.
 3. Renames the staging directory into place and deletes the local export, as before.
 
-The trade-off is temporary local disk space about the size of the vault. Before exporting, the plugin checks that the local disk has room for the previous snapshot plus the usual minimum free space. If it doesn't, or the folder can't be created, the run stages on the backup drive as before and reports a warning. Local staging left behind by a crash is removed the next time Joplin starts.
+The trade-off is temporary local disk space about the size of the vault. Before exporting, the plugin checks that the local disk has room for the previous snapshot plus the usual minimum free space. If it doesn't, the folder can't be created, or the local export fails (for example because the disk fills up on a first backup), the run stages on the backup drive as before and reports a warning. If the backup directory is on the same disk as the Joplin profile, staging locally would only add writes, so the run stages on the backup drive without a warning. Local staging left behind by a crash is removed the next time Joplin starts.
 
 ### Scheduler catch-up behaviour
 

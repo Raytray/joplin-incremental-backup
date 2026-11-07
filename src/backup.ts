@@ -673,6 +673,14 @@ function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () =
   return { stop: () => clearInterval(timer) };
 }
 
+function localStagingWarning(error: unknown): BackupWarning {
+  const reason = error instanceof Error ? error.message : String(error);
+  return {
+    kind: 'staging',
+    message: `The export could not be staged on this computer (${reason}); it was written to the backup drive instead.`,
+  };
+}
+
 async function resolveLocalStagingRoot(options: BackupOptions): Promise<string> {
   if (options.localStagingRoot !== undefined) return options.localStagingRoot;
   return path.join(await joplin.plugins.dataDir(), LOCAL_STAGING_DIR_NAME);
@@ -689,15 +697,22 @@ function manifestBytes(manifest: Manifest | null): number {
  * The export needs local space for a full copy of the vault. The previous
  * snapshot's size is the best estimate available before exporting, so the
  * local disk must have that much free on top of the usual minimum.
+ *
+ * When the local folder is on the same device as the backup root, staging
+ * locally would write the full export to that device anyway and then copy the
+ * changed files to it again, so `sameDevice` tells the caller to skip it.
  */
 async function prepareLocalStaging(
   stagingRoot: string,
+  backupRoot: string,
   runName: string,
   previousManifest: Manifest | null,
   minFreeBytes: number | undefined,
-): Promise<{ dir: string } | { error: unknown }> {
+): Promise<{ dir: string } | { sameDevice: true } | { error: unknown }> {
   try {
     await fs.mkdir(stagingRoot, { recursive: true });
+    const [local, backup] = await Promise.all([fs.stat(stagingRoot), fs.stat(backupRoot)]);
+    if (local.dev === backup.dev) return { sameDevice: true };
     const required = (minFreeBytes ?? DEFAULT_MIN_FREE_BYTES) + manifestBytes(previousManifest);
     await assertDiskSpace(stagingRoot, required);
     return { dir: path.join(stagingRoot, runName) };
@@ -974,6 +989,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     if (settings.stageLocally) {
       const staging = await prepareLocalStaging(
         await resolveLocalStagingRoot(options),
+        backupRoot,
         path.basename(activeDir),
         lastManifest,
         context.minFreeBytes,
@@ -981,36 +997,54 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       if ('dir' in staging) {
         localDir = staging.dir;
         logger.info(`Staging the export locally in "${localDir}".`);
+      } else if ('sameDevice' in staging) {
+        logger.info(
+          'The backup directory is on the same disk as the plugin data; staging on the backup drive.',
+        );
       } else {
-        const reason =
-          staging.error instanceof Error ? staging.error.message : String(staging.error);
         logger.warn(
           'Could not stage the export locally; staging on the backup drive.',
           staging.error,
         );
-        stagingWarnings.push({
-          kind: 'staging',
-          message: `The export could not be staged on this computer (${reason}); it was written to the backup drive instead.`,
-        });
+        stagingWarnings.push(localStagingWarning(staging.error));
       }
     }
-    // The export is written here: the local staging directory, or the
-    // staging directory on the backup drive.
-    const exportDir = localDir ?? activeDir;
 
     let folderIds: string[] = [];
-    const exportResult = await retryTransient(async () => {
-      // Read the notebook list right before each attempt so a notebook created
-      // or deleted during the inventory scan (or between retries) is not
-      // missed or passed to the exporter after it is gone.
-      folderIds = await getAllFolderIds();
-      logger.info(`Exporting ${folderIds.length} notebook(s)...`);
-      // Each attempt starts from an empty directory so a partial export from
-      // a failed attempt can never end up in the snapshot.
-      await safeRmDir(exportDir);
-      await fs.mkdir(exportDir, { recursive: true });
-      return joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, exportDir);
-    }, context.exportRetries);
+    const exportTo = (dir: string): Promise<unknown> =>
+      retryTransient(async () => {
+        // Read the notebook list right before each attempt so a notebook created
+        // or deleted during the inventory scan (or between retries) is not
+        // missed or passed to the exporter after it is gone.
+        folderIds = await getAllFolderIds();
+        logger.info(`Exporting ${folderIds.length} notebook(s)...`);
+        // Each attempt starts from an empty directory so a partial export from
+        // a failed attempt can never end up in the snapshot.
+        await safeRmDir(dir);
+        await fs.mkdir(dir, { recursive: true });
+        return joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, dir);
+      }, context.exportRetries);
+
+    let exportResult: unknown;
+    if (localDir) {
+      try {
+        exportResult = await exportTo(localDir);
+      } catch (error) {
+        // The space check can only estimate the vault's size (and has nothing
+        // to go on for a first backup), so the local disk may still fill up.
+        // Fall back to staging on the backup drive rather than failing.
+        logger.warn('Local export failed; staging on the backup drive instead.', error);
+        await safeRmDir(localDir);
+        localDir = null;
+        stagingWarnings.push(localStagingWarning(error));
+        exportResult = await exportTo(activeDir);
+      }
+    } else {
+      exportResult = await exportTo(activeDir);
+    }
+    // The export was written here: the local staging directory, or the
+    // staging directory on the backup drive.
+    const exportDir = localDir ?? activeDir;
     const exportWarnings = extractExportWarnings(exportResult);
     if (exportWarnings.length > 0) {
       logger.warn(
