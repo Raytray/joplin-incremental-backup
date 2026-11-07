@@ -4,7 +4,7 @@ A Joplin desktop plugin that creates **deduplicated incremental snapshots** of y
 
 Each snapshot is a complete, self-contained copy of your data. Consecutive snapshots share unchanged files via hardlinks (rsnapshot-style), so storing dozens of snapshots costs only a fraction of the space of full copies. If hardlinks aren't supported on your backup drive (e.g. some network shares or FAT/exFAT drives), the plugin transparently falls back to plain copies.
 
-> **Status:** in development. The plugin requires Joplin 3.2+ and desktop only — Joplin's mobile apps do not support plugins.
+> **Status:** in development. The plugin requires Joplin 3.2.11+ and desktop only — Joplin's mobile apps do not support plugins.
 
 ## What it does
 

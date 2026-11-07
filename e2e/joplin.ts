@@ -12,7 +12,7 @@
 import { spawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import { randomBytes } from 'crypto';
-import { createReadStream, createWriteStream, existsSync, realpathSync } from 'fs';
+import { closeSync, createWriteStream, existsSync, openSync, readSync, realpathSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -26,9 +26,12 @@ const CLIPPER_PORTS = Array.from({ length: 10 }, (_, i) => 41184 + i);
 const START_TIMEOUT_MS = 120_000;
 const STOP_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
-/** The database counts as idle once no write transaction has been open for this long. */
-const DB_IDLE_MS = 1_000;
-const DB_IDLE_TIMEOUT_MS = 15_000;
+/** How long a Data API write may take to show up committed in the database. */
+const COMMIT_TIMEOUT_MS = 10_000;
+/** Logged by src/index.ts when the plugin's onStart runs. */
+const PLUGIN_STARTED_MESSAGE = 'Incremental Backup plugin started.';
+/** First Joplin release that parses `--running-tests`. */
+const RUNNING_TESTS_FLAG_SINCE = '3.3.4';
 
 export function joplinBinary(): string {
   const bin = process.env.JOPLIN_BIN ?? path.join(REPO_ROOT, '.cache/joplin/current/joplin');
@@ -40,42 +43,63 @@ export function joplinBinary(): string {
   return bin;
 }
 
-const flagSupport = new Map<string, Promise<boolean>>();
-
 /**
- * Whether this Joplin build knows a start-up flag. Joplin exits on flags it
- * does not recognise, and some (e.g. `--running-tests`, absent from 3.2) are
- * newer than the oldest supported version. The app's code ships uncompressed
- * in resources/app.asar, so the flag's name appears there iff it is parsed.
+ * The Joplin version of an extracted build, read from package.json inside
+ * resources/app.asar next to the executable (only the asar's header and that
+ * one file are read). `JOPLIN_VERSION` is the fallback for an executable with
+ * no asar beside it, e.g. a wrapper script.
  */
-export function joplinAcceptsFlag(bin: string, flag: string): Promise<boolean> {
+export function joplinVersion(bin: string): string {
   const asar = path.join(path.dirname(realpathSync(bin)), 'resources', 'app.asar');
-  const key = `${asar}\0${flag}`;
-  let result = flagSupport.get(key);
-  if (!result) {
-    result = containsBytes(asar, Buffer.from(flag));
-    flagSupport.set(key, result);
+  try {
+    return readAsarPackageVersion(asar);
+  } catch (error) {
+    if (process.env.JOPLIN_VERSION) return process.env.JOPLIN_VERSION;
+    throw new Error(
+      `Could not read Joplin's version from ${asar} (${(error as Error).message}). ` +
+        'Set JOPLIN_VERSION to the version of JOPLIN_BIN.',
+    );
   }
-  return result;
 }
 
-/** Stream `file` looking for `needle`, keeping an overlap across chunk boundaries. */
-function containsBytes(file: string, needle: Buffer): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const stream = createReadStream(file);
-    let tail = Buffer.alloc(0);
-    stream.on('data', (chunk: string | Buffer) => {
-      const window = Buffer.concat([tail, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
-      if (window.includes(needle)) {
-        stream.destroy();
-        resolve(true);
-        return;
-      }
-      tail = window.subarray(Math.max(0, window.length - needle.length + 1));
-    });
-    stream.on('end', () => resolve(false));
-    stream.on('error', reject);
-  });
+/**
+ * asar layout: a Chromium pickle holding the header size, then a pickle with
+ * the JSON file index; file offsets count from the end of the header.
+ */
+function readAsarPackageVersion(asar: string): string {
+  const fd = openSync(asar, 'r');
+  try {
+    const read = (position: number, length: number) => {
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, position);
+      return buffer;
+    };
+    const headerSize = read(4, 4).readUInt32LE(0);
+    const header = read(8, headerSize);
+    const index = JSON.parse(header.subarray(8, 8 + header.readUInt32LE(4)).toString('utf8')) as {
+      files: Record<string, { size: number; offset: string }>;
+    };
+    const entry = index.files['package.json'];
+    if (!entry) throw new Error('no package.json in the archive');
+    const pkg = JSON.parse(
+      read(8 + headerSize + Number(entry.offset), entry.size).toString('utf8'),
+    ) as { version?: unknown };
+    if (typeof pkg.version !== 'string') throw new Error('package.json has no version');
+    return pkg.version;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Compare dotted numeric versions: negative if a < b. */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 export function pluginSettingKey(key: string): string {
@@ -142,6 +166,15 @@ export class JoplinInstance {
     return path.join(this.workDir, `joplin-launch-${this.launchCount}.log`);
   }
 
+  /** Joplin's reason for refusing to load the plugin in this profile, if it logged one. */
+  private async pluginLoadError(): Promise<string | undefined> {
+    const log = await fs.readFile(path.join(this.profileDir, 'log.txt'), 'utf8').catch(() => '');
+    const line = log
+      .split('\n')
+      .find((l) => l.includes('Could not load plugin') && l.includes(REPO_ROOT));
+    return line?.slice(line.indexOf('Could not load plugin'));
+  }
+
   /** The plugin's log lines (`[IncrementalBackup] ...`) from the most recent launch. */
   async pluginLog(): Promise<string[]> {
     const text = await fs.readFile(this.launchLogPath, 'utf8');
@@ -172,11 +205,14 @@ export class JoplinInstance {
     await fs.mkdir(this.homeDir, { recursive: true });
     await this.writeFileSettings();
 
+    // Everything that can fail before spawning happens before the log opens.
+    const bin = joplinBinary();
+    const version = joplinVersion(bin);
+
     this.launchCount += 1;
     const logPath = this.launchLogPath;
     const log = createWriteStream(logPath);
 
-    const bin = joplinBinary();
     const child = spawn(
       bin,
       [
@@ -184,12 +220,12 @@ export class JoplinInstance {
         // runners restrict unprivileged user namespaces.
         '--no-sandbox',
         '--disable-gpu',
-        // Newer Joplin (e.g. 3.7) locks the profile and refuses to start it
-        // again for a few seconds after a forced quit; this flag turns that
-        // off. Older versions (e.g. 3.2) do not know the flag and use
-        // Electron's single-instance lock, which the isolated HOME already
+        // From 3.3.4 Joplin locks the profile and refuses to start it again
+        // for a few seconds after a forced quit; this flag turns that off.
+        // Older versions exit on the unknown flag. They use Electron's
+        // single-instance lock instead, which the isolated HOME already
         // keeps apart from a Joplin the developer has open.
-        ...((await joplinAcceptsFlag(bin, '--running-tests')) ? ['--running-tests'] : []),
+        ...(compareVersions(version, RUNNING_TESTS_FLAG_SINCE) >= 0 ? ['--running-tests'] : []),
         '--no-welcome',
         '--log-level',
         'debug',
@@ -244,6 +280,22 @@ export class JoplinInstance {
         },
         START_TIMEOUT_MS,
       );
+      // The Data API is up before Joplin has finished starting, and a quit
+      // requested that early can be ignored (seen on 3.2.11). Plugins load
+      // late in startup, so wait for ours to report in, or fail at once
+      // with the reason Joplin gives for not loading it.
+      await waitFor(
+        'the plugin to start',
+        async () => {
+          if (!this.child) throw new WaitAborted(`Joplin exited during startup; see ${logPath}`);
+          const refusal = await this.pluginLoadError();
+          if (refusal) throw new WaitAborted(`Joplin did not load the plugin: ${refusal}`);
+          return (await this.pluginLog()).some((l) => l.includes(PLUGIN_STARTED_MESSAGE))
+            ? true
+            : undefined;
+        },
+        START_TIMEOUT_MS,
+      );
     } catch (error) {
       try {
         await this.stop();
@@ -267,7 +319,6 @@ export class JoplinInstance {
       return;
     }
     const pid = child.pid;
-    await this.waitForDatabaseIdle();
     const killGroup = (signal: NodeJS.Signals) => {
       try {
         process.kill(-pid, signal);
@@ -306,25 +357,6 @@ export class JoplinInstance {
     }
   }
 
-  /**
-   * Wait until no write transaction has been open for DB_IDLE_MS. The Data
-   * API can answer before its write commits (seen on 3.2.11), and SIGTERM
-   * does not wait for it: the write is rolled back, leaving a hot journal.
-   * In Joplin's journal mode, database.sqlite-journal exists only while a
-   * write transaction is open. Gives up after DB_IDLE_TIMEOUT_MS, since a
-   * busy app (e.g. indexing) is still better stopped than waited on forever.
-   */
-  private async waitForDatabaseIdle(): Promise<void> {
-    const journal = `${this.databasePath}-journal`;
-    const deadline = Date.now() + DB_IDLE_TIMEOUT_MS;
-    let idleSince = Date.now();
-    while (Date.now() < deadline) {
-      if (existsSync(journal)) idleSince = Date.now();
-      else if (Date.now() - idleSince >= DB_IDLE_MS) return;
-      await sleep(50);
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Data API
   // -------------------------------------------------------------------------
@@ -356,35 +388,91 @@ export class JoplinInstance {
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
-  createFolder(title: string): Promise<JoplinApiItem> {
-    return this.api('POST', 'folders', { title });
+  // Each write below returns only once a separate read-only connection sees
+  // it, i.e. once it is committed. The Data API can answer before its write
+  // commits (seen on 3.2.11); a stop right after would roll it back.
+
+  async createFolder(title: string): Promise<JoplinApiItem> {
+    const folder = await this.api<JoplinApiItem>('POST', 'folders', { title });
+    await this.awaitCommitted(`folder ${folder.id}`, 'SELECT 1 FROM folders WHERE id = ?', [
+      folder.id,
+    ]);
+    return folder;
   }
 
-  createNote(props: { title: string; body: string; parent_id: string }): Promise<JoplinApiItem> {
-    return this.api('POST', 'notes', props);
+  async createNote(props: {
+    title: string;
+    body: string;
+    parent_id: string;
+  }): Promise<JoplinApiItem> {
+    const note = await this.api<JoplinApiItem>('POST', 'notes', props);
+    await this.awaitCommitted(`note ${note.id}`, 'SELECT 1 FROM notes WHERE id = ?', [note.id]);
+    return note;
   }
 
-  createTag(title: string): Promise<JoplinApiItem> {
-    return this.api('POST', 'tags', { title });
+  async createTag(title: string): Promise<JoplinApiItem> {
+    const tag = await this.api<JoplinApiItem>('POST', 'tags', { title });
+    await this.awaitCommitted(`tag ${tag.id}`, 'SELECT 1 FROM tags WHERE id = ?', [tag.id]);
+    return tag;
   }
 
-  tagNote(tagId: string, noteId: string): Promise<unknown> {
-    return this.api('POST', `tags/${tagId}/notes`, { id: noteId });
+  async tagNote(tagId: string, noteId: string): Promise<void> {
+    await this.api('POST', `tags/${tagId}/notes`, { id: noteId });
+    await this.awaitCommitted(
+      `tag ${tagId} on note ${noteId}`,
+      'SELECT 1 FROM note_tags WHERE tag_id = ? AND note_id = ?',
+      [tagId, noteId],
+    );
   }
 
-  createResource(filename: string, content: Buffer, mime: string): Promise<JoplinApiItem> {
+  async createResource(filename: string, content: Buffer, mime: string): Promise<JoplinApiItem> {
     const form = new FormData();
     form.append('data', new Blob([content], { type: mime }), filename);
     form.append('props', JSON.stringify({ title: filename }));
-    return this.api('POST', 'resources', form);
+    const resource = await this.api<JoplinApiItem>('POST', 'resources', form);
+    await this.awaitCommitted(`resource ${resource.id}`, 'SELECT 1 FROM resources WHERE id = ?', [
+      resource.id,
+    ]);
+    return resource;
   }
 
-  updateNote(id: string, props: Record<string, unknown>): Promise<JoplinApiItem> {
-    return this.api('PUT', `notes/${id}`, props);
+  async updateNote(id: string, props: { title?: string; body?: string }): Promise<JoplinApiItem> {
+    const note = await this.api<JoplinApiItem>('PUT', `notes/${id}`, props);
+    const columns = Object.keys(props) as (keyof typeof props)[];
+    await this.awaitCommitted(
+      `update of note ${id}`,
+      `SELECT 1 FROM notes WHERE id = ? ${columns.map((c) => `AND ${c} = ?`).join(' ')}`,
+      [id, ...columns.map((c) => props[c] as string)],
+    );
+    return note;
   }
 
-  deleteNotePermanently(id: string): Promise<unknown> {
-    return this.api('DELETE', `notes/${id}`, undefined, { permanent: '1' });
+  async deleteNotePermanently(id: string): Promise<void> {
+    await this.api('DELETE', `notes/${id}`, undefined, { permanent: '1' });
+    await this.awaitCommitted(
+      `deletion of note ${id}`,
+      'SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM notes WHERE id = ?)',
+      [id],
+    );
+  }
+
+  /** Wait until `sql` (a `SELECT 1 ...`) returns a row on a read-only connection. */
+  private async awaitCommitted(description: string, sql: string, params: string[]): Promise<void> {
+    await waitFor(
+      `${description} to be committed`,
+      () => {
+        const db = new DatabaseSync(this.databasePath, {
+          readOnly: true,
+          timeout: DB_BUSY_TIMEOUT_MS,
+        });
+        try {
+          return db.prepare(sql).get(...params) ? true : undefined;
+        } finally {
+          db.close();
+        }
+      },
+      COMMIT_TIMEOUT_MS,
+    );
   }
 
   // -------------------------------------------------------------------------
