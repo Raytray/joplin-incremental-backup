@@ -113,5 +113,6 @@ jobs:
             ${{ runner.temp }}/joplin-e2e/*/*.log
             ${{ runner.temp }}/joplin-e2e/*/profile/log*.txt
             ${{ runner.temp }}/joplin-e2e/*/backups/**/manifest.json
+            /dev/shm/joplin-e2e-backups-*/backups/**/manifest.json
           if-no-files-found: warn
           retention-days: 14

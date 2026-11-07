@@ -16,9 +16,10 @@ import { createWriteStream, existsSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
+import pluginManifest from '../src/manifest.json';
 
 export const REPO_ROOT = path.resolve(__dirname, '..');
-export const PLUGIN_ID = 'io.github.raytray.joplin-incremental-backup';
+export const PLUGIN_ID: string = pluginManifest.id;
 
 /** Joplin's clipper server takes the first free port from 41184 upwards. */
 const CLIPPER_PORTS = Array.from({ length: 10 }, (_, i) => 41184 + i);
@@ -44,6 +45,12 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Thrown from a `waitFor` check to stop waiting at once (e.g. the app died). */
+export class WaitAborted extends Error {}
+
+/** Busy timeout for profile-database connections: Joplin may hold a write lock. */
+const DB_BUSY_TIMEOUT_MS = 5_000;
+
 /** Poll `check` until it returns a non-undefined value. */
 export async function waitFor<T>(
   description: string,
@@ -57,6 +64,7 @@ export async function waitFor<T>(
       const value = await check();
       if (value !== undefined) return value;
     } catch (error) {
+      if (error instanceof WaitAborted) throw error;
       lastError = error;
     }
     await sleep(POLL_INTERVAL_MS);
@@ -77,7 +85,9 @@ export class JoplinInstance {
   readonly token = randomBytes(32).toString('hex');
 
   private child: ChildProcess | null = null;
+  /** Resolves once the app has exited and its launch log is flushed. */
   private exited: Promise<void> | null = null;
+  private spawnError: Error | null = null;
   private port: number | null = null;
   private launchCount = 0;
 
@@ -95,6 +105,11 @@ export class JoplinInstance {
   async pluginLog(): Promise<string[]> {
     const text = await fs.readFile(this.launchLogPath, 'utf8');
     return text.split('\n').filter((line) => line.includes('[IncrementalBackup]'));
+  }
+
+  /** Where the plugin stages exports locally (`joplin.plugins.dataDir()`/staging). */
+  get localStagingRoot(): string {
+    return path.join(this.profileDir, 'plugin-data', PLUGIN_ID, 'staging');
   }
 
   get databasePath(): string {
@@ -149,14 +164,27 @@ export class JoplinInstance {
         detached: true,
       },
     );
-    child.stdout?.pipe(log);
-    child.stderr?.pipe(log);
+    // Two writers share the log, so neither may end it; it is ended once
+    // the child's stdio has closed.
+    child.stdout?.pipe(log, { end: false });
+    child.stderr?.pipe(log, { end: false });
     this.child = child;
+    this.spawnError = null;
     this.exited = new Promise((resolve) => {
-      child.once('exit', () => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
         this.child = null;
         this.port = null;
-        resolve();
+        log.end(() => resolve());
+      };
+      // 'close' follows 'exit' once stdout/stderr are drained. A failed
+      // spawn (e.g. EACCES) emits 'error' and may never emit 'close'.
+      child.once('close', finish);
+      child.once('error', (error) => {
+        this.spawnError = error;
+        if (child.pid === undefined) finish();
       });
     });
 
@@ -164,13 +192,20 @@ export class JoplinInstance {
       this.port = await waitFor(
         'the Joplin Data API to come up',
         async () => {
-          if (!this.child) throw new Error(`Joplin exited during startup; see ${logPath}`);
+          if (this.spawnError) {
+            throw new WaitAborted(`Could not start Joplin: ${this.spawnError.message}`);
+          }
+          if (!this.child) throw new WaitAborted(`Joplin exited during startup; see ${logPath}`);
           return this.findOwnClipperPort();
         },
         START_TIMEOUT_MS,
       );
     } catch (error) {
-      await this.stop();
+      try {
+        await this.stop();
+      } catch {
+        // Report why startup failed, not why cleanup did.
+      }
       throw error;
     }
   }
@@ -182,7 +217,11 @@ export class JoplinInstance {
    */
   async stop(): Promise<void> {
     const child = this.child;
-    if (!child || child.pid === undefined) return;
+    if (!child) return;
+    if (child.pid === undefined) {
+      await this.exited;
+      return;
+    }
     const pid = child.pid;
     const killGroup = (signal: NodeJS.Signals) => {
       try {
@@ -295,7 +334,10 @@ export class JoplinInstance {
    * can roll back (as Joplin itself does on its next start).
    */
   readSetting(key: string): string | undefined {
-    const db = new DatabaseSync(this.databasePath, { readOnly: this.child !== null });
+    const db = new DatabaseSync(this.databasePath, {
+      readOnly: this.child !== null,
+      timeout: DB_BUSY_TIMEOUT_MS,
+    });
     try {
       const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
         { value: string } | undefined;
@@ -312,7 +354,7 @@ export class JoplinInstance {
   /** Write plugin settings. Only while the app is stopped, or it would overwrite them. */
   writePluginSettings(values: Record<string, string | number | boolean>): void {
     if (this.child) throw new Error('Stop Joplin before editing its database.');
-    const db = new DatabaseSync(this.databasePath);
+    const db = new DatabaseSync(this.databasePath, { timeout: DB_BUSY_TIMEOUT_MS });
     try {
       const insert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
       for (const [key, value] of Object.entries(values)) {

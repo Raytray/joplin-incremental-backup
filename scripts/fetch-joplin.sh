@@ -44,8 +44,15 @@ else
   rm "$APPIMAGE" "$APPIMAGE.sha512"
 
   # electron-builder names the executable after the package; find it rather
-  # than hard-coding the name.
-  bin="$(find squashfs-root -maxdepth 1 -type f -executable -iname '*joplin*' | head -n1)"
+  # than hard-coding the name. Only an ELF binary qualifies: the AppImage root
+  # also holds executable .desktop files and the like.
+  bin=""
+  while IFS= read -r -d '' candidate; do
+    if [[ "$(head -c 4 "$candidate" | tr -d '\0')" == $'\x7fELF' ]]; then
+      bin="$candidate"
+      break
+    fi
+  done < <(find squashfs-root -maxdepth 1 -type f -executable -iname '*joplin*' -print0 | sort -z)
   if [[ -z "$bin" ]]; then
     echo "Could not find the Joplin executable in the extracted AppImage" >&2
     ls squashfs-root >&2

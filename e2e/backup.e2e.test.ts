@@ -21,9 +21,17 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { BackupChanges } from '../src/backup';
+import type { Manifest } from '../src/manifest';
+import { listSnapshots } from '../src/retention';
 import { JoplinInstance, waitFor } from './joplin';
 
 const BACKUP_TIMEOUT_MS = 120_000;
+/**
+ * `ACTIVE_DIR_PREFIX` from src/backup.ts, which cannot be loaded here: it
+ * imports the Joplin plugin API, which only exists inside Joplin.
+ */
+const ACTIVE_DIR_PREFIX = '_joplin_active_';
 /** A directory on a different filesystem from the work directory (tmpfs). */
 const OTHER_DEVICE_ROOT = process.env.JOPLIN_E2E_OTHER_DEVICE ?? '/dev/shm';
 
@@ -33,27 +41,6 @@ const MODES = [
 ] as const;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ATTACHMENT = Buffer.from(`attachment bytes ${Date.now()}\n`.repeat(64));
-
-interface ManifestFile {
-  path: string;
-  size: number;
-  sha256: string;
-}
-
-interface Manifest {
-  snapshotId: string;
-  joplinVersion: string;
-  fileCount: number;
-  files: ManifestFile[];
-  deduplication: string;
-}
-
-interface Changes {
-  added: string[];
-  modified: string[];
-  deleted: string[];
-  unchanged: number;
-}
 
 describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   let workDir: string;
@@ -81,13 +68,13 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   }
 
   async function snapshotNames(): Promise<string[]> {
-    const entries = await fs.readdir(backupDir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory() && /^\d{8}T\d{6}/.test(e.name))
-      .map((e) => e.name)
-      .sort();
+    return listSnapshots(backupDir);
   }
 
+  /**
+   * Parsed independently of the plugin's own reader, so the test checks the
+   * on-disk format rather than trusting the code under test.
+   */
   async function readManifest(snapshot: string): Promise<Manifest> {
     return JSON.parse(
       await fs.readFile(path.join(backupDir, snapshot, 'manifest.json'), 'utf8'),
@@ -97,7 +84,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   interface RunRecord {
     status?: string;
     snapshotName?: string;
-    changes?: Changes;
+    changes?: BackupChanges;
     warnings?: string[];
     message?: string;
   }
@@ -122,16 +109,26 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
       },
       BACKUP_TIMEOUT_MS,
     );
-    // The lock is released after the result is recorded.
+    // After recording the result the run releases the lock, then removes its
+    // staging directories. Wait for all of it, or stopping the app could cut
+    // the cleanup short.
     await waitFor(
-      'the backup lock to be released',
-      async () => ((await exists(path.join(backupDir, '.backup.lock'))) ? undefined : true),
+      'the backup run to clean up',
+      async () => ((await runIsCleanedUp()) ? true : undefined),
       BACKUP_TIMEOUT_MS,
     );
     const record = lastRunRecord();
     expect(record.status, record.message).toBe(expectedStatus);
     expect(record.warnings ?? []).toEqual([]);
     return record;
+  }
+
+  async function runIsCleanedUp(): Promise<boolean> {
+    if (await exists(path.join(backupDir, '.backup.lock'))) return false;
+    const onDrive = await fs.readdir(backupDir).catch(() => [] as string[]);
+    if (onDrive.some((name) => name.startsWith(ACTIVE_DIR_PREFIX))) return false;
+    const local = await fs.readdir(joplin.localStagingRoot).catch(() => [] as string[]);
+    return local.length === 0;
   }
 
   async function exists(p: string): Promise<boolean> {
@@ -162,7 +159,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
       return;
     }
     expect(local).toHaveLength(1);
-    expect(path.resolve(local[0]).startsWith(joplin.profileDir + path.sep)).toBe(true);
+    expect(path.dirname(local[0])).toBe(joplin.localStagingRoot);
     expect(await exists(local[0]), 'local staging directory is removed').toBe(false);
   }
 
@@ -171,20 +168,33 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   }
 
   beforeAll(async () => {
+    try {
+      await setUp();
+    } catch (error) {
+      failed = true;
+      throw error;
+    }
+  });
+
+  async function setUp(): Promise<void> {
     const root = process.env.JOPLIN_E2E_WORKDIR;
     if (root) {
-      workDir = path.join(root, mode.slug);
+      workDir = path.resolve(root, mode.slug);
       await fs.rm(workDir, { recursive: true, force: true });
       await fs.mkdir(workDir, { recursive: true });
     } else {
       workDir = await fs.mkdtemp(path.join(os.tmpdir(), `joplin-e2e-${mode.slug}-`));
     }
+    // The plugin logs real paths; compare like with like (macOS /var → /private/var).
+    workDir = await fs.realpath(workDir);
     joplin = new JoplinInstance(workDir);
 
     if (mode.stageLocally) {
       // Local staging is skipped when the plugin data and the backups share a
       // disk, so put the backups on another device.
-      backupParent = await fs.mkdtemp(path.join(OTHER_DEVICE_ROOT, 'joplin-e2e-backups-'));
+      backupParent = await fs.realpath(
+        await fs.mkdtemp(path.join(OTHER_DEVICE_ROOT, 'joplin-e2e-backups-')),
+      );
       const [work, other] = await Promise.all([fs.stat(workDir), fs.stat(backupParent)]);
       if (work.dev === other.dev) {
         throw new Error(
@@ -196,19 +206,31 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
       backupParent = workDir;
     }
     backupDir = path.join(backupParent, 'backups');
-  });
+  }
 
   afterAll(async () => {
-    await joplin?.stop();
+    try {
+      await joplin?.stop();
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      await cleanUp();
+    }
+  });
+
+  async function cleanUp(): Promise<void> {
     if (failed || process.env.JOPLIN_E2E_KEEP) {
-      console.log(`Kept e2e work directory: ${workDir} (backups: ${backupDir})`);
+      if (workDir) console.log(`Kept e2e work directory: ${workDir} (backups: ${backupDir})`);
       return;
     }
     if (backupParent && backupParent !== workDir) {
       await fs.rm(backupParent, { recursive: true, force: true });
     }
-    if (!process.env.JOPLIN_E2E_WORKDIR) await fs.rm(workDir, { recursive: true, force: true });
-  });
+    if (workDir && !process.env.JOPLIN_E2E_WORKDIR) {
+      await fs.rm(workDir, { recursive: true, force: true });
+    }
+  }
 
   // Steps build on each other; stop at the first failure.
   afterEach((context) => {
