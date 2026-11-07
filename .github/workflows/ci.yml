@@ -64,7 +64,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        joplin: ['3.7.22']
+        # Oldest supported (app_min_version) and the pinned current release.
+        joplin: ['3.2.11', '3.7.22']
 
     env:
       JOPLIN_VERSION: ${{ matrix.joplin }}

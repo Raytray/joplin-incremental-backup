@@ -4,7 +4,7 @@ A Joplin desktop plugin that creates **deduplicated incremental snapshots** of y
 
 Each snapshot is a complete, self-contained copy of your data. Consecutive snapshots share unchanged files via hardlinks (rsnapshot-style), so storing dozens of snapshots costs only a fraction of the space of full copies. If hardlinks aren't supported on your backup drive (e.g. some network shares or FAT/exFAT drives), the plugin transparently falls back to plain copies.
 
-> **Status:** in development. The plugin requires Joplin 3.7+ and desktop only — Joplin's mobile apps do not support plugins.
+> **Status:** in development. The plugin requires Joplin 3.2.11+ and desktop only — Joplin's mobile apps do not support plugins.
 
 ## What it does
 
@@ -140,7 +140,7 @@ npm run test:e2e:headless     # same, on a virtual display (as in CI); needs xvf
 
 For headless runs, install Xvfb first (`sudo apt-get install xvfb`). The harness unsets `WAYLAND_DISPLAY` for Joplin, so on WSLg or a Wayland desktop no window appears.
 
-Set `JOPLIN_BIN` to use a different Joplin executable, `JOPLIN_E2E_WORKDIR` to choose where the profile, logs and backups go, and `JOPLIN_E2E_KEEP=1` to keep them after a passing run. They are always kept when a test fails. The tests never touch your own Joplin profile, and they run alongside a Joplin you already have open.
+CI runs the suite on the oldest supported Joplin (3.2.11) and on 3.7.22. To test another version locally, run `npm run fetch-joplin -- 3.2.11`; it becomes the default for `npm run test:e2e`. Set `JOPLIN_BIN` to use a different Joplin executable, `JOPLIN_E2E_WORKDIR` to choose where the profile, logs and backups go, and `JOPLIN_E2E_KEEP=1` to keep them after a passing run. They are always kept when a test fails. The tests never touch your own Joplin profile, and they run alongside a Joplin you already have open.
 
 For information on publishing the plugin, see [GENERATOR_DOC.md](./GENERATOR_DOC.md).
 
