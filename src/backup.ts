@@ -25,7 +25,9 @@ import { dedup, getDeduplicationMode } from './dedup';
 import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
+  addInitializedBackupRoot,
   getSettings,
+  isKnownBackupRoot,
   parseLastBackup,
   requireBackupPath,
   setLastBackup,
@@ -43,6 +45,12 @@ export const LOCK_FILENAME = '.backup.lock';
  */
 export const ACTIVE_DIR_PREFIX = '_joplin_active_';
 export const LATEST_FILENAME = 'latest.txt';
+/**
+ * Marker written into every backup directory the plugin sets up. Its absence
+ * from a directory that was set up before means the directory is not the one
+ * we were writing to (most often: the backup drive is not mounted).
+ */
+export const ROOT_MARKER_FILENAME = '.joplin-incremental-backup';
 export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
 export const DEFAULT_EXPORT_RETRIES = 3;
 export const EXPORT_FORMAT = 'raw';
@@ -655,6 +663,92 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
   };
 }
 
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    return (await fs.stat(filePath)).isFile();
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.stat(target);
+    return true;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+export function legacyBackupRootMissingMessage(backupRoot: string): string {
+  return (
+    `The backup directory "${backupRoot}" does not exist, but backups have been made ` +
+    'before. If the backup drive is disconnected or not mounted, reconnect it and try ' +
+    'again. If this is a new location, create the directory first, or choose a ' +
+    'different one in Tools > Options > Incremental Backup.'
+  );
+}
+
+export function backupRootUnavailableMessage(backupRoot: string): string {
+  return (
+    `The backup directory "${backupRoot}" is not available: its marker file ` +
+    `(${ROOT_MARKER_FILENAME}) is missing. If the backup drive is disconnected or not ` +
+    'mounted, reconnect it and try again. If you moved or deleted the backups on purpose, ' +
+    `create an empty file named ${ROOT_MARKER_FILENAME} in that directory, or choose a ` +
+    'different one in Tools > Options > Incremental Backup.'
+  );
+}
+
+/**
+ * Make sure `backupRoot` is the directory this plugin has been writing to
+ * before anything is written there.
+ *
+ * Creating the directory blindly (`mkdir -p`) is dangerous when it lives on a
+ * drive that is not mounted: the path is recreated on the internal disk, the
+ * disk-space check measures the wrong filesystem, and the snapshots end up
+ * hidden underneath the mount point once the drive comes back.
+ *
+ * - Marker present → ready, and remembered so its later disappearance is
+ *   caught (covers markers created by hand or by another profile).
+ * - Marker missing, directory set up before → refuse (drive likely missing).
+ * - Marker missing, directory never set up → create it and write the marker.
+ *   This includes directories used by versions before the marker existed,
+ *   with one exception: if backups were made before (`hasBackedUpBefore`) but
+ *   no directory has been recorded yet, this is the first run after upgrading,
+ *   and a directory that does not exist is far more likely an unmounted drive
+ *   than a new location. Creating it would put the marker on the internal
+ *   disk and lock the real drive out once it is mounted, so refuse instead.
+ */
+export async function prepareBackupRoot(
+  backupRoot: string,
+  initializedRoots: readonly string[],
+  hasBackedUpBefore = false,
+): Promise<void> {
+  const markerPath = path.join(backupRoot, ROOT_MARKER_FILENAME);
+  const known = isKnownBackupRoot(backupRoot, initializedRoots);
+  if (await fileExists(markerPath)) {
+    if (!known) await addInitializedBackupRoot(backupRoot);
+    return;
+  }
+
+  if (known) {
+    throw new Error(backupRootUnavailableMessage(backupRoot));
+  }
+
+  if (hasBackedUpBefore && initializedRoots.length === 0 && !(await pathExists(backupRoot))) {
+    throw new Error(legacyBackupRootMissingMessage(backupRoot));
+  }
+
+  await ensureBackupRoot(backupRoot);
+  await atomicWriteFile(
+    markerPath,
+    'This directory holds Joplin Incremental Backup snapshots. Do not delete this file.\n',
+  );
+  await addInitializedBackupRoot(backupRoot);
+}
+
 // ---------------------------------------------------------------------------
 // Backup
 // ---------------------------------------------------------------------------
@@ -697,7 +791,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   let context: ResolvedContext;
   try {
     context = await resolveContext(options);
-    await ensureBackupRoot(context.backupRoot);
+    await prepareBackupRoot(
+      context.backupRoot,
+      context.settings.initializedBackupRoots,
+      context.settings.lastBackup !== '',
+    );
     // Gate before locking: never commit to a run (or leave a lock behind) when
     // there is provably not enough space.
     await assertDiskSpace(context.backupRoot, context.minFreeBytes);
@@ -876,6 +974,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const requestedName = generateSnapshotName(options.now ?? new Date());
     const snapshotName = await resolveUniqueSnapshotName(backupRoot, requestedName);
     const snapshotDir = snapshotDirPath(backupRoot, snapshotName);
+    if (lastSnapshotName && snapshotName < lastSnapshotName) {
+      logger.warn(
+        `New snapshot ${snapshotName} sorts before the previous one (${lastSnapshotName}); ` +
+          'the system clock may have gone backwards. Retention still keeps the new snapshot.',
+      );
+    }
 
     const meta: ManifestMeta = {
       snapshotId: snapshotName,
@@ -891,7 +995,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     await fs.rename(activeDir, snapshotDir);
     await atomicWriteFile(path.join(backupRoot, LATEST_FILENAME), snapshotName);
 
-    await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention));
+    await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention), snapshotName);
 
     // Persist the committed snapshot immediately so settings never lag behind
     // what is on disk, even if later result/message building throws.
@@ -905,7 +1009,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings.push({
         kind: 'storage',
         message:
-          'Hardlinks are not supported on this filesystem — every file was copied, so each snapshot consumes the full vault size.',
+          'Hardlinks are not supported on this filesystem — unchanged files are kept as full copies, so each snapshot consumes the full vault size.',
       });
     }
     if (dedupResult.failed > 0) {
@@ -1070,8 +1174,9 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 }
 
 /**
- * Crash-recovery helper used by `onStart`: recreate the root and clear staging
- * directories left behind by a crashed run.
+ * Crash-recovery helper used by `onStart`: clear staging directories left
+ * behind by a crashed run. It never creates the backup directory: a missing
+ * one (e.g. an unplugged drive) simply has nothing to recover.
  *
  * A live backup holds the lock; when the lock is fresh nothing is removed, so
  * a second Joplin instance pointed at the same backup root cannot destroy a
@@ -1088,7 +1193,6 @@ export async function recoverBackupDirs(options: BackupOptions = {}): Promise<vo
       logger.info(`Skipping backup directory recovery: ${(error as Error).message}`);
       return;
     }
-    await ensureBackupRoot(backupRoot);
 
     const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
     if (await hasFreshLock(path.join(backupRoot, LOCK_FILENAME), staleLockMs)) {

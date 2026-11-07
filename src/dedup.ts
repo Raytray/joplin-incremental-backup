@@ -4,7 +4,7 @@ import {
   collectFilesRecursive,
   computeFileSha256,
   errorCode,
-  hardlinkOrCopy,
+  isHardlinkUnsupportedError,
   mapWithConcurrency,
   toDedupeKey,
   toManifestKey,
@@ -24,9 +24,13 @@ export interface ContentIndex {
 
 export interface DedupResult {
   hardlinked: number;
+  /**
+   * Matched files left as full copies because the filesystem cannot hardlink.
+   * Nothing is copied: the exported file is already identical to the match.
+   */
   copied: number;
   unchanged: number;
-  /** Files whose link/copy could not be staged; the exported copy was kept. */
+  /** Files that could not be hardlinked on a filesystem that supports links; the exported file was kept. */
   failed: number;
   /** Normalized relative path (`toManifestKey`) → SHA-256. */
   hashes: Map<string, string>;
@@ -78,12 +82,16 @@ async function fileExists(filePath: string): Promise<boolean> {
 }
 
 /**
- * Replace `activePath` with a hardlink (or a copy) of `sourcePath` without ever
- * leaving the destination missing.
+ * Replace `activePath` with a hardlink to `sourcePath` without ever leaving the
+ * destination missing.
  *
- * The replacement is staged under a temporary name in the same directory and
- * then swapped in with a rename. If anything fails the freshly exported file
- * stays exactly where it is — only the space saving is lost, never the data.
+ * The link is staged under a temporary name in the same directory and then
+ * swapped in with a rename. If anything fails the freshly exported file stays
+ * exactly where it is — only the space saving is lost, never the data.
+ *
+ * Returns `'copy'` when the filesystem cannot hardlink. The exported file is
+ * then left untouched: it is already a byte-identical full copy, so copying the
+ * previous snapshot's file over it would only cost I/O.
  */
 export async function replaceWithLink(
   sourcePath: string,
@@ -92,11 +100,11 @@ export async function replaceWithLink(
   const tempPath = `${activePath}${DEDUP_TEMP_SUFFIX}`;
   await fs.rm(tempPath, { force: true });
 
-  let mode: 'hardlink' | 'copy';
   try {
-    mode = await hardlinkOrCopy(sourcePath, tempPath);
+    await fs.link(sourcePath, tempPath);
   } catch (error) {
     await fs.rm(tempPath, { force: true });
+    if (isHardlinkUnsupportedError(error)) return 'copy';
     throw error;
   }
 
@@ -109,7 +117,7 @@ export async function replaceWithLink(
       await fs.rm(tempPath, { force: true });
       throw error;
     }
-    // Windows can refuse to rename onto an existing file. The staged copy is
+    // Windows can refuse to rename onto an existing file. The staged link is
     // ready, so removing the destination is safe.
     await fs.rm(activePath, { force: true });
     try {
@@ -120,7 +128,35 @@ export async function replaceWithLink(
     }
   }
 
-  return mode;
+  return 'hardlink';
+}
+
+/**
+ * Whether hardlinks work between `sourcePath` and `dir`, tested with files this
+ * process owns. A link failure on one matched file can be per-file (Linux
+ * returns EPERM under protected_hardlinks for files owned by another user), so
+ * a failed probe is confirmed here before linking is turned off for the run.
+ */
+export async function canHardlink(sourcePath: string, dir: string): Promise<boolean> {
+  const [source, target] = await Promise.all([fs.stat(sourcePath), fs.stat(dir)]);
+  if (source.dev !== target.dev) return false;
+
+  const probePath = path.join(
+    dir,
+    `.hardlink_probe_${process.pid}_${Math.random().toString(36).slice(2, 8)}${DEDUP_TEMP_SUFFIX}`,
+  );
+  const linkPath = `${probePath}.link`;
+  try {
+    await fs.writeFile(probePath, '');
+    await fs.link(probePath, linkPath);
+    return true;
+  } catch (error) {
+    if (isHardlinkUnsupportedError(error)) return false;
+    throw error;
+  } finally {
+    await fs.rm(linkPath, { force: true });
+    await fs.rm(probePath, { force: true });
+  }
 }
 
 /**
@@ -138,6 +174,12 @@ export async function dedup(
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const computeHash = options.computeHash ?? computeFileSha256;
+  /**
+   * Resolves to whether hardlinks work on this filesystem, settled by the
+   * first link attempt of the run. Every later file waits for it, so an
+   * unsupported filesystem costs one failed probe, not one per file.
+   */
+  let linkSupport: Promise<boolean> | null = null;
 
   const modes = await mapWithConcurrency(
     files,
@@ -158,7 +200,27 @@ export async function dedup(
       if (!(await fileExists(sourcePath))) return null;
 
       try {
-        return await replaceWithLink(sourcePath, activePath);
+        let mode: 'hardlink' | 'copy';
+        if (linkSupport) {
+          // The exported file is identical to the match and stays as a full copy.
+          if (!(await linkSupport)) return 'copy';
+          mode = await replaceWithLink(sourcePath, activePath);
+        } else {
+          // First link of the run: it decides for everyone else. An
+          // "unsupported" result is confirmed with canHardlink before linking
+          // is turned off; any other error is per-file and counts as supported.
+          const probe = replaceWithLink(sourcePath, activePath);
+          linkSupport = probe
+            .then(
+              (result) =>
+                result === 'hardlink' || canHardlink(sourcePath, path.dirname(activePath)),
+            )
+            .catch(() => true);
+          mode = await probe;
+        }
+        if (mode === 'hardlink') return mode;
+        if (!(await linkSupport)) return 'copy';
+        throw new Error('The filesystem supports hardlinks, but this file could not be linked.');
       } catch (error) {
         // The exported file is still in place and has the recorded hash, so the
         // snapshot stays correct — only the deduplication is lost.

@@ -85,6 +85,26 @@ describe('pruneSnapshots', () => {
     await expect(listSnapshots(ROOT)).resolves.toEqual([names[2]]);
   });
 
+  it('never deletes keepSnapshot, even when it sorts oldest (clock went backwards)', async () => {
+    const existing = [snapshotName(5), snapshotName(6), snapshotName(7)];
+    const created = snapshotName(1);
+    await createSnapshots([...existing, created]);
+
+    const removed = await pruneSnapshots(ROOT, 3, created);
+
+    expect(removed).toEqual([snapshotName(5)]);
+    await expect(listSnapshots(ROOT)).resolves.toEqual([created, snapshotName(6), snapshotName(7)]);
+  });
+
+  it('keeps only keepSnapshot at a retention of 1', async () => {
+    const created = snapshotName(0);
+    await createSnapshots([created, snapshotName(8), snapshotName(9)]);
+
+    await pruneSnapshots(ROOT, 1, created);
+
+    await expect(listSnapshots(ROOT)).resolves.toEqual([created]);
+  });
+
   it('skips a snapshot that cannot be removed (EBUSY) and keeps going', async () => {
     const names = Array.from({ length: 3 }, (_, index) => snapshotName(index));
     await createSnapshots(names);
