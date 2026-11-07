@@ -15,6 +15,7 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 - **Skip unchanged backups** — if nothing has changed since the last snapshot (notes, attachments, notebooks, tags, or which notes carry which tags), the backup is skipped entirely (can be disabled).
 - **Integrity verification** — every snapshot includes a `manifest.json` with the size and SHA-256 hash of every file. A verify command re-checks the whole snapshot and reports any missing or corrupted files.
 - **Crash-safe** — each backup run stages its files in a unique temporary directory (e.g. `_joplin_active_20261021T090000_12345_abcdef`) that is atomically renamed into place when complete. An exclusive lock prevents overlapping runs; the lock's mtime is refreshed periodically so a long export is never mistaken for an abandoned one. Stale locks are recovered atomically (rename-steal), and leftover staging data is cleaned up on startup unless another backup holds a fresh lock.
+- **Optional local staging** — with **Stage the export on this computer** on (under Advanced), the export goes to a temporary folder in the Joplin profile instead of the backup drive. Unchanged files are then hardlinked from the previous snapshot and only new or changed files are copied to the drive, so a daily backup of a large vault writes only what changed. See [Local staging](#local-staging).
 - **Disk-space pre-flight** — checks available space before starting a backup and aborts the run if the backup drive is below the minimum free-space threshold, so a full disk can't produce a truncated snapshot. (If free space can't be measured on a platform, the backup proceeds with a warning.)
 - **Export warnings surfaced** — if Joplin's exporter skips any item (e.g. still-encrypted notes), the warnings are logged and shown in the backup dialog so an incomplete snapshot isn't mistaken for a complete one.
 - **Export completeness check** — after each export, the plugin compares the note/folder/resource counts from Joplin's database against the exported files. Missing items (often due to still-encrypted content) are reported as warnings.
@@ -29,6 +30,7 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
    - **Backup interval (hours)** — `0` disables automatic backups.
    - **Snapshots to keep** — oldest snapshots beyond this count are pruned.
    - **Skip if nothing changed** — on by default.
+   - **Stage the export on this computer** (Advanced) — off by default. See [Local staging](#local-staging).
 4. Backups now run automatically on the interval. You can also trigger one any time via **Tools > Create incremental backup**, and check snapshot health via **Tools > Verify incremental backup**.
 
 ### Backup layout
@@ -59,6 +61,18 @@ The first backup to a directory creates it and writes a marker file, `.joplin-in
 If you moved or deleted the backups on purpose, create an empty `.joplin-incremental-backup` file in the directory, or choose a different directory.
 
 When upgrading from a version without the marker, the first backup adopts your existing backup directory. If that directory does not exist at that point but backups have been made before, the plugin assumes the drive is not mounted and refuses rather than creating it. If it really is a new location, create the directory yourself and the next backup will use it.
+
+### Local staging
+
+By default each run exports the whole vault into the staging directory **on the backup drive**, hashes it there, and then replaces unchanged files with hardlinks. That saves space but not writes: a 5 GB vault backed up daily writes about 5 GB to the drive every day, even if one note changed. On a USB stick or a slow drive that also makes every run slow.
+
+With **Stage the export on this computer** on, a run instead:
+
+1. Exports into `plugin-data/<plugin id>/staging/_joplin_active_…` in the Joplin profile, and hashes the files there.
+2. Builds the staging directory on the backup drive by hardlinking files that are identical to the previous snapshot and copying only new or changed files.
+3. Renames the staging directory into place and deletes the local export, as before.
+
+The trade-off is temporary local disk space about the size of the vault. Before exporting, the plugin checks that the local disk has room for the previous snapshot plus the usual minimum free space. If it doesn't, or the folder can't be created, the run stages on the backup drive as before and reports a warning. Local staging left behind by a crash is removed the next time Joplin starts.
 
 ### Scheduler catch-up behaviour
 

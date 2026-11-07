@@ -38,6 +38,7 @@ describe('getSettings', () => {
       [SETTING_KEYS.backupRetention]: 3,
       [SETTING_KEYS.backupInterval]: 12,
       [SETTING_KEYS.onlyOnChange]: false,
+      [SETTING_KEYS.stageLocally]: true,
       [SETTING_KEYS.lastBackup]: '2026-01-01T00:00:00.000Z',
       [SETTING_KEYS.lastSnapshot]: '20260101T000000',
       [SETTING_KEYS.initializedBackupRoots]: '["/tmp/backups"]',
@@ -48,6 +49,7 @@ describe('getSettings', () => {
       backupRetention: 3,
       backupInterval: 12,
       onlyOnChange: false,
+      stageLocally: true,
       lastBackup: '2026-01-01T00:00:00.000Z',
       lastSnapshot: '20260101T000000',
       lastBackupResult: '',
@@ -193,6 +195,7 @@ describe('registerSettings', () => {
     expect(settings[SETTING_KEYS.backupRetention].public).toBe(true);
     expect(settings[SETTING_KEYS.backupInterval].public).toBe(true);
     expect(settings[SETTING_KEYS.onlyOnChange].public).toBe(true);
+    expect(settings[SETTING_KEYS.stageLocally].public).toBe(true);
     expect(settings[SETTING_KEYS.lastBackup].public).toBe(false);
     expect(settings[SETTING_KEYS.lastSnapshot].public).toBe(false);
   });
@@ -240,6 +243,18 @@ describe('registerSettings', () => {
     expect(settings[SETTING_KEYS.backupRetention].value).toBe(5);
     expect(settings[SETTING_KEYS.backupInterval].value).toBe(24);
     expect(settings[SETTING_KEYS.onlyOnChange].value).toBe(true);
+    expect(settings[SETTING_KEYS.stageLocally].value).toBe(false);
+  });
+
+  it('reads local staging as off unless it is explicitly on', async () => {
+    for (const [stored, expected] of [
+      [undefined, false],
+      ['true', false],
+      [true, true],
+    ] as const) {
+      mockState.values = { [SETTING_KEYS.stageLocally]: stored };
+      expect((await getSettings()).stageLocally).toBe(expected);
+    }
   });
 });
 

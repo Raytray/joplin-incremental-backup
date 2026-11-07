@@ -10,6 +10,7 @@ import {
   atomicWriteFile,
   collectEntries,
   computeFileSha256,
+  DEFAULT_MIN_FREE_BYTES,
   ensureBackupRoot,
   errorCode,
   hasFreshLock,
@@ -20,8 +21,8 @@ import {
   touchLock,
 } from './platform';
 import { buildManifest, FINGERPRINT_DIGEST_KEYS, readManifest, writeManifest } from './manifest';
-import type { ChangeFingerprint, DeduplicationMode, ManifestMeta } from './manifest';
-import { dedup, getDeduplicationMode } from './dedup';
+import type { ChangeFingerprint, DeduplicationMode, Manifest, ManifestMeta } from './manifest';
+import { dedup, getDeduplicationMode, stageFromLocal } from './dedup';
 import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
@@ -46,6 +47,11 @@ export const LOCK_FILENAME = '.backup.lock';
  */
 export const ACTIVE_DIR_PREFIX = '_joplin_active_';
 export const LATEST_FILENAME = 'latest.txt';
+/**
+ * Folder under the plugin's data directory that holds local staging
+ * directories when "Stage the export on this computer" is on.
+ */
+export const LOCAL_STAGING_DIR_NAME = 'staging';
 /**
  * Marker written into every backup directory the plugin sets up. Its absence
  * from a directory that was set up before means the directory is not the one
@@ -77,8 +83,10 @@ function formatBytes(bytes: number): string {
  * - `completeness`: items inferred missing from a database/export count mismatch.
  * - `storage`: the snapshot is complete, but deduplication was limited, so it
  *   uses more disk space than expected (e.g. no hardlink support).
+ * - `staging`: local staging was requested but could not be used, so the
+ *   whole export was written to the backup drive.
  */
-export type BackupWarningKind = 'export' | 'completeness' | 'storage';
+export type BackupWarningKind = 'export' | 'completeness' | 'storage' | 'staging';
 
 export interface BackupWarning {
   kind: BackupWarningKind;
@@ -97,6 +105,7 @@ export function describeWarnings(warnings: readonly BackupWarning[]): string {
   const exported = ofKind('export');
   const completeness = ofKind('completeness');
   const storage = ofKind('storage');
+  const staging = ofKind('staging');
 
   const parts: string[] = [];
   if (exported.length > 0) {
@@ -115,6 +124,9 @@ export function describeWarnings(warnings: readonly BackupWarning[]): string {
       `Deduplication was limited, so this snapshot uses more disk space than expected ` +
         `(${storage.length} warning(s), see warnings).`,
     );
+  }
+  if (staging.length > 0) {
+    parts.push('The export could not be staged locally and was written to the backup drive.');
   }
   return parts.length > 0 ? ` ${parts.join(' ')}` : '';
 }
@@ -196,6 +208,8 @@ export interface BackupResult {
   duration?: string;
   /** Semantic change summary relative to the previous snapshot. */
   changes?: BackupChanges;
+  /** Whether the export was staged on this computer rather than on the backup drive. */
+  stagedLocally?: boolean;
   /**
    * Set when the run was skipped because another backup was recorded after
    * `skipIfBackedUpAfter`: that backup's `lastBackup` time, in ms since the epoch.
@@ -229,6 +243,11 @@ export interface BackupOptions {
    * finished while they waited to start is not repeated.
    */
   skipIfBackedUpAfter?: number;
+  /**
+   * Override the folder that holds local staging directories (used by tests).
+   * Defaults to `staging/` under the plugin's data directory.
+   */
+  localStagingRoot?: string;
 }
 
 export interface VerifyResult {
@@ -654,6 +673,39 @@ function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () =
   return { stop: () => clearInterval(timer) };
 }
 
+async function resolveLocalStagingRoot(options: BackupOptions): Promise<string> {
+  if (options.localStagingRoot !== undefined) return options.localStagingRoot;
+  return path.join(await joplin.plugins.dataDir(), LOCAL_STAGING_DIR_NAME);
+}
+
+/** Total size of the files in `manifest`, or 0 without one. */
+function manifestBytes(manifest: Manifest | null): number {
+  return manifest?.files.reduce((sum, file) => sum + file.size, 0) ?? 0;
+}
+
+/**
+ * Prepare a local directory to export into, or explain why there is none.
+ *
+ * The export needs local space for a full copy of the vault. The previous
+ * snapshot's size is the best estimate available before exporting, so the
+ * local disk must have that much free on top of the usual minimum.
+ */
+async function prepareLocalStaging(
+  stagingRoot: string,
+  runName: string,
+  previousManifest: Manifest | null,
+  minFreeBytes: number | undefined,
+): Promise<{ dir: string } | { error: unknown }> {
+  try {
+    await fs.mkdir(stagingRoot, { recursive: true });
+    const required = (minFreeBytes ?? DEFAULT_MIN_FREE_BYTES) + manifestBytes(previousManifest);
+    await assertDiskSpace(stagingRoot, required);
+    return { dir: path.join(stagingRoot, runName) };
+  } catch (error) {
+    return { error };
+  }
+}
+
 async function resolveContext(options: BackupOptions): Promise<ResolvedContext> {
   const settings = await getSettings();
   const backupRoot = configuredBackupRoot(settings, options);
@@ -850,6 +902,8 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
   await acquireLock(lockPath, context.staleLockMs);
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
+  /** Local directory the export goes to, when staging locally. */
+  let localDir: string | null = null;
 
   try {
     const supersededBy = await backupRecordedAfter(options.skipIfBackedUpAfter);
@@ -916,6 +970,34 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       return result;
     }
 
+    const stagingWarnings: BackupWarning[] = [];
+    if (settings.stageLocally) {
+      const staging = await prepareLocalStaging(
+        await resolveLocalStagingRoot(options),
+        path.basename(activeDir),
+        lastManifest,
+        context.minFreeBytes,
+      );
+      if ('dir' in staging) {
+        localDir = staging.dir;
+        logger.info(`Staging the export locally in "${localDir}".`);
+      } else {
+        const reason =
+          staging.error instanceof Error ? staging.error.message : String(staging.error);
+        logger.warn(
+          'Could not stage the export locally; staging on the backup drive.',
+          staging.error,
+        );
+        stagingWarnings.push({
+          kind: 'staging',
+          message: `The export could not be staged on this computer (${reason}); it was written to the backup drive instead.`,
+        });
+      }
+    }
+    // The export is written here: the local staging directory, or the
+    // staging directory on the backup drive.
+    const exportDir = localDir ?? activeDir;
+
     let folderIds: string[] = [];
     const exportResult = await retryTransient(async () => {
       // Read the notebook list right before each attempt so a notebook created
@@ -925,9 +1007,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       logger.info(`Exporting ${folderIds.length} notebook(s)...`);
       // Each attempt starts from an empty directory so a partial export from
       // a failed attempt can never end up in the snapshot.
-      await safeRmDir(activeDir);
-      await fs.mkdir(activeDir, { recursive: true });
-      return joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, activeDir);
+      await safeRmDir(exportDir);
+      await fs.mkdir(exportDir, { recursive: true });
+      return joplin.commands.execute('exportFolders', folderIds, EXPORT_FORMAT, exportDir);
     }, context.exportRetries);
     const exportWarnings = extractExportWarnings(exportResult);
     if (exportWarnings.length > 0) {
@@ -938,7 +1020,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
 
     logger.info('Collecting exported files...');
-    const activeEntries = await collectEntries(activeDir, activeDir);
+    const activeEntries = await collectEntries(exportDir, exportDir);
     if (activeEntries.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
     }
@@ -968,16 +1050,31 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const warnings: BackupWarning[] = [
       ...exportWarnings.map((message): BackupWarning => ({ kind: 'export', message })),
       ...completenessWarnings,
+      ...stagingWarnings,
     ];
 
-    logger.info('Deduplicating against previous snapshot...');
-    const dedupResult: DedupResult = await dedup(
-      activeDir,
-      lastSnapshotDir,
-      lastManifest,
-      activeFiles,
-      { computeHash: context.computeHash, fileSizes },
-    );
+    const dedupOptions = { computeHash: context.computeHash, fileSizes };
+    let dedupResult: DedupResult;
+    if (localDir) {
+      logger.info('Writing new and changed files to the backup drive...');
+      dedupResult = await stageFromLocal(
+        localDir,
+        activeDir,
+        lastSnapshotDir,
+        lastManifest,
+        activeFiles,
+        dedupOptions,
+      );
+    } else {
+      logger.info('Deduplicating against previous snapshot...');
+      dedupResult = await dedup(
+        activeDir,
+        lastSnapshotDir,
+        lastManifest,
+        activeFiles,
+        dedupOptions,
+      );
+    }
 
     // Semantic change summary relative to the previous snapshot.
     const previousFiles = lastManifest?.files ?? [];
@@ -1067,6 +1164,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       copied: dedupResult.copied,
       unchanged: dedupResult.unchanged,
       warnings: warningMessages,
+      stagedLocally: localDir !== null,
       durationMs,
       duration,
       changes,
@@ -1127,6 +1225,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       await safeRmDir(activeDir);
     } catch (error) {
       logger.warn('Failed to clean the staging directory.', error);
+    }
+    if (localDir) {
+      try {
+        await safeRmDir(localDir);
+      } catch (error) {
+        logger.warn('Failed to clean the local staging directory.', error);
+      }
     }
   }
 }
@@ -1206,6 +1311,24 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
 }
 
 /**
+ * Clear local staging directories left behind by a crashed run. They live in
+ * this profile's plugin data directory, and Joplin opens a profile in only
+ * one instance, so at startup none of them can belong to a running backup.
+ * Runs whatever the current setting, since staging may have been turned off
+ * after the crash.
+ */
+async function recoverLocalStagingDirs(options: BackupOptions): Promise<void> {
+  try {
+    const stagingRoot = await resolveLocalStagingRoot(options);
+    for (const name of await listStagingDirs(stagingRoot)) {
+      await safeRmDir(path.join(stagingRoot, name));
+    }
+  } catch (error) {
+    logger.warn('Local staging directory recovery skipped.', error);
+  }
+}
+
+/**
  * Crash-recovery helper used by `onStart`: clear staging directories left
  * behind by a crashed run. It never creates the backup directory: a missing
  * one (e.g. an unplugged drive) simply has nothing to recover.
@@ -1215,6 +1338,7 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
  * run that is in progress.
  */
 export async function recoverBackupDirs(options: BackupOptions = {}): Promise<void> {
+  await recoverLocalStagingDirs(options);
   try {
     const settings = await getSettings();
     let backupRoot: string;

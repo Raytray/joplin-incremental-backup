@@ -9,7 +9,13 @@ import fs from 'fs/promises';
 import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
-import { buildContentIndex, dedup, getDeduplicationMode, replaceWithLink } from '../src/dedup';
+import {
+  buildContentIndex,
+  dedup,
+  getDeduplicationMode,
+  replaceWithLink,
+  stageFromLocal,
+} from '../src/dedup';
 import type { FileEntry, Manifest } from '../src/manifest';
 import { logger } from '../src/logger';
 
@@ -435,5 +441,111 @@ describe('getDeduplicationMode', () => {
     expect(getDeduplicationMode({ hardlinked: 0, copied: 1 })).toBe('copy');
     expect(getDeduplicationMode({ hardlinked: 2, copied: 1 })).toBe('copy');
     expect(getDeduplicationMode({ hardlinked: 0, copied: 0 })).toBe('none');
+  });
+});
+
+describe('stageFromLocal', () => {
+  const LOCAL = '/local/staging';
+  const TARGET = '/snapshots/_joplin_active_run';
+
+  beforeEach(async () => {
+    await fs.mkdir(LOCAL, { recursive: true });
+  });
+
+  it('hardlinks unchanged files and copies only new or changed ones', async () => {
+    const previous = [
+      { path: 'same.md', content: 'same' },
+      { path: 'changed.md', content: 'old' },
+    ];
+    await writeFiles(PREVIOUS, previous);
+    await writeFiles(LOCAL, [
+      { path: 'same.md', content: 'same' },
+      { path: 'changed.md', content: 'new' },
+      { path: 'resources/r1', content: 'attachment' },
+    ]);
+    const copySpy = vi.spyOn(fs, 'copyFile');
+
+    const result = await stageFromLocal(LOCAL, TARGET, PREVIOUS, makeManifest(previous), [
+      'same.md',
+      'changed.md',
+      'resources/r1',
+    ]);
+
+    expect(result).toMatchObject({ hardlinked: 1, copied: 0, unchanged: 2, failed: 0 });
+    expect(result.hashes.get('changed.md')).toBe(sha256('new'));
+    const [linked, original] = await Promise.all([
+      fs.stat(path.join(TARGET, 'same.md')),
+      fs.stat(path.join(PREVIOUS, 'same.md')),
+    ]);
+    expect(linked.ino).toBe(original.ino);
+    expect(copySpy.mock.calls.map(([source]) => String(source)).sort()).toEqual([
+      path.join(LOCAL, 'changed.md'),
+      path.join(LOCAL, 'resources/r1'),
+    ]);
+    expect(await fs.readFile(path.join(TARGET, 'changed.md'), 'utf8')).toBe('new');
+    expect(await fs.readFile(path.join(TARGET, 'resources/r1'), 'utf8')).toBe('attachment');
+  });
+
+  it('copies everything when there is no previous snapshot', async () => {
+    await writeFiles(LOCAL, [{ path: 'a.md', content: 'a' }]);
+
+    const result = await stageFromLocal(LOCAL, TARGET, null, null, ['a.md']);
+
+    expect(result).toMatchObject({ hardlinked: 0, copied: 0, unchanged: 1 });
+    expect(await fs.readFile(path.join(TARGET, 'a.md'), 'utf8')).toBe('a');
+  });
+
+  it('copies matched files when the target cannot hardlink, probing only once', async () => {
+    const files = [
+      { path: 'a.md', content: 'a' },
+      { path: 'b.md', content: 'b' },
+      { path: 'c.md', content: 'c' },
+    ];
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(LOCAL, files);
+    const linkSpy = vi
+      .spyOn(fs, 'link')
+      .mockRejectedValue(Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }));
+
+    const result = await stageFromLocal(
+      LOCAL,
+      TARGET,
+      PREVIOUS,
+      makeManifest(files),
+      files.map((f) => f.path),
+    );
+
+    expect(result).toMatchObject({ hardlinked: 0, copied: 3, unchanged: 0, failed: 0 });
+    // One link attempt plus canHardlink's probe; the other files wait for the verdict.
+    expect(linkSpy).toHaveBeenCalledTimes(2);
+    for (const file of files) {
+      expect(await fs.readFile(path.join(TARGET, file.path), 'utf8')).toBe(file.content);
+    }
+  });
+
+  it('copies a file whose link fails on a filesystem that supports links, and counts it', async () => {
+    const files = [{ path: 'a.md', content: 'a' }];
+    await writeFiles(PREVIOUS, files);
+    await writeFiles(LOCAL, files);
+    vi.spyOn(fs, 'link').mockRejectedValueOnce(
+      Object.assign(new Error('protected'), { code: 'EPERM' }),
+    );
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const result = await stageFromLocal(LOCAL, TARGET, PREVIOUS, makeManifest(files), ['a.md']);
+
+    expect(result).toMatchObject({ hardlinked: 0, copied: 0, failed: 1 });
+    expect(await fs.readFile(path.join(TARGET, 'a.md'), 'utf8')).toBe('a');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('a.md'), expect.any(Error));
+  });
+
+  it('copies a matched file whose previous copy has gone missing', async () => {
+    const files = [{ path: 'a.md', content: 'a' }];
+    await writeFiles(LOCAL, files);
+
+    const result = await stageFromLocal(LOCAL, TARGET, PREVIOUS, makeManifest(files), ['a.md']);
+
+    expect(result).toMatchObject({ hardlinked: 0, unchanged: 1 });
+    expect(await fs.readFile(path.join(TARGET, 'a.md'), 'utf8')).toBe('a');
   });
 });

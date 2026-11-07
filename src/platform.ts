@@ -6,7 +6,7 @@ import { logger } from './logger';
 const HASH_CHUNK_SIZE_SMALL = 64 * 1024; // ≤ 64 KB files
 const HASH_CHUNK_SIZE_LARGE = 1024 * 1024; // > 64 KB files
 const HASH_CHUNK_THRESHOLD = 64 * 1024;
-const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
+export const DEFAULT_MIN_FREE_BYTES = 1024 * 1024 * 1024; // 1 GiB
 
 /**
  * `fs.link` codes that can mean the filesystem cannot hardlink at all. EISDIR

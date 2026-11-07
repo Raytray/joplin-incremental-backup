@@ -34,6 +34,8 @@ export interface MockJoplinState {
   dataError: Error | null;
   versionError: Error | null;
   dataPageLimit: number;
+  /** Returned by `joplin.plugins.dataDir()`. */
+  dataDir: string;
   /** The plugin script passed to `joplin.plugins.register()`. */
   pluginScript: { onStart?: () => Promise<void> } | null;
 }
@@ -58,6 +60,7 @@ function createState(): MockJoplinState {
     dataError: null,
     versionError: null,
     dataPageLimit: 100,
+    dataDir: '/plugin-data',
     pluginScript: null,
   };
 }
@@ -145,6 +148,9 @@ const joplin = {
   plugins: {
     register(script: { onStart?: () => Promise<void> }): void {
       mockState.pluginScript = script;
+    },
+    async dataDir(): Promise<string> {
+      return mockState.dataDir;
     },
   },
   async versionInfo(): Promise<{
