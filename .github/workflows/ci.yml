@@ -33,14 +33,18 @@ jobs:
       - name: Format Check
         run: npm run format:check
 
-      - name: Typecheck
-        run: npx tsc --noEmit
-
-      - name: Build plugin
-        run: npm run dist
-
+      # npm ci already builds and type-checks src via the prepare script
+      # (npm run dist). These cover what that build does not.
       - name: Run tests with coverage
         run: npm run test:coverage
+
+      - name: Typecheck src without test globals
+        if: ${{ !cancelled() }}
+        run: npx tsc --noEmit -p tsconfig.build.json
+
+      - name: Typecheck src and tests
+        if: ${{ !cancelled() }}
+        run: npx tsc --noEmit
 
       - name: Upload coverage report
         if: always()
