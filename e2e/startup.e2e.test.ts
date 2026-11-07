@@ -28,6 +28,7 @@ import {
   backdateLastBackup,
   DAY_MS,
   exists,
+  expectNoRunStarted,
   expectSnapshotIntact,
   inode,
   launchAndAwaitBackup,
@@ -37,14 +38,9 @@ import {
   removeWorkDir,
   waitForLogLine,
 } from './helpers';
-import { JoplinInstance, sleep } from './joplin';
+import { JoplinInstance } from './joplin';
 
 const HOUR_MS = 60 * 60 * 1000;
-/**
- * How long to watch for a backup that must not happen: the scheduler's
- * 5-second startup grace period (`CATCH_UP_GRACE_MS`), plus a wide margin.
- */
-const NO_RUN_WATCH_MS = 15_000;
 /** Older than the plugin's 30-minute stale-lock threshold. */
 const STALE_AGE_MS = 2 * HOUR_MS;
 const ATTACHMENT = Buffer.from(`first attachment ${Date.now()}\n`.repeat(32));
@@ -71,14 +67,12 @@ describe('startup behaviour in a real Joplin', () => {
 
   /** Launch, wait until the plugin logs `pattern`, and check no run follows. */
   async function launchExpectingNoRun(pattern: RegExp): Promise<void> {
-    const before = joplin.readPluginSetting('lastBackupResultJson') ?? '';
+    const before = joplin.readPluginSetting('lastBackupResultJson');
     await joplin.start();
+    // Logged when the schedule is set up, so the grace period starts no earlier.
     await waitForLogLine(joplin, pattern);
-    await sleep(NO_RUN_WATCH_MS);
-    const log = await joplin.pluginLog();
+    await expectNoRunStarted(joplin, before);
     await joplin.stop();
-    expect(log.filter((l) => l.includes('Starting backup run'))).toEqual([]);
-    expect(joplin.readPluginSetting('lastBackupResultJson') ?? '').toBe(before);
   }
 
   /** Create a directory (and its parents) and set its mtime `ageMs` in the past. */
@@ -164,6 +158,9 @@ describe('startup behaviour in a real Joplin', () => {
     expect(record.error).toContain('does not exist, but backups have been made before');
     expect(await exists(backupDir), 'backup directory must not be created').toBe(false);
     expect(joplin.readPluginSetting('lastBackup')).toBe(lastBackup);
+    // The refused directory is not remembered as set up, so creating it by
+    // hand (the next step) makes it usable.
+    expect(joplin.readPluginSetting('initializedBackupRoots') ?? '[]').toBe('[]');
   });
 
   it('takes a first snapshot once the directory exists', async () => {
@@ -227,9 +224,11 @@ describe('startup behaviour in a real Joplin', () => {
     expect(changes?.modified).toContain(`${ids.folder}.md`);
     expect(await read(second, ids.folder)).toMatch(/^E2E notebook, renamed$/m);
 
-    // Joplin's export leaves out trashed notes, so a note in the trash drops
-    // out of the backup (the older snapshot still has it) even though it can
-    // still be restored in Joplin.
+    // Known limitation, not the behaviour we want: Joplin's export (and the
+    // Data API's note list) leave out trashed notes, so a note in the trash
+    // drops out of the newest snapshot, with no warning, while Joplin can
+    // still restore it. Once retention prunes the older snapshots it is in no
+    // backup. A fix that backs up the trash should update these assertions.
     expect(changes?.deleted).toEqual([`${ids.trashedNote}.md`]);
     expect(await exists(path.join(backupDir, second, `${ids.trashedNote}.md`))).toBe(false);
     expect(await read(first, ids.trashedNote)).toContain('Goes.');
@@ -245,6 +244,7 @@ describe('startup behaviour in a real Joplin', () => {
         path.join(backupDir, second, 'resources', resourceFile(ids.secondResource)!),
       ),
     ).toEqual(SECOND_ATTACHMENT);
+    expect(resourceFile(ids.resource)).toBeDefined();
     const firstResource = `resources/${resourceFile(ids.resource)}`;
     expect(await inode(backupDir, second, firstResource)).toBe(
       await inode(backupDir, first, firstResource),
@@ -261,16 +261,16 @@ describe('startup behaviour in a real Joplin', () => {
     try {
       await joplin.start();
       await waitForLogLine(joplin, /Another backup holds the lock; skipping this scheduled run/);
+      // Contention is not a failed run: the lock holder records its own
+      // result. The retry is minutes away, so nothing else starts either.
+      await expectNoRunStarted(joplin, resultBefore);
       const log = await joplin.pluginLog();
       await joplin.stop();
 
       expect(log.some((l) => l.includes('leaving staging data in place'))).toBe(true);
-      expect(log.filter((l) => l.includes('Starting backup run'))).toEqual([]);
       const lockAfter = await fs.stat(lockPath);
       expect(lockAfter.mtimeMs, 'lock left untouched').toBe(lockBefore.mtimeMs);
       expect(await snapshotNames()).toEqual(snapshots);
-      // Contention is not a failed run: the lock holder records its own result.
-      expect(joplin.readPluginSetting('lastBackupResultJson')).toBe(resultBefore);
       expect(joplin.readPluginSetting('lastBackup')).toBe(lastBackup);
     } finally {
       await fs.rm(lockPath, { force: true });
@@ -294,7 +294,6 @@ describe('startup behaviour in a real Joplin', () => {
     expect(changes?.deleted).toEqual([]);
     const manifest = await expectSnapshotIntact(backupDir, snapshotName!);
     for (const file of manifest.files) {
-      if (file.path === 'manifest.json') continue;
       expect(await inode(backupDir, snapshotName!, file.path), file.path).toBe(
         await inode(backupDir, previous, file.path),
       );
@@ -310,9 +309,11 @@ describe('startup behaviour in a real Joplin', () => {
 
   it('waits for the next interval when the last backup is less than two intervals old', async () => {
     // 1.5 intervals old: overdue, but not enough for a catch-up at startup.
-    joplin.writePluginSettings({ backupInterval: 1 });
-    backdateLastBackup(joplin, 1.5 * HOUR_MS);
-    await launchExpectingNoRun(/scheduling the next run in 30m/);
+    // The next run is due 12 h after the back-date; the log rounds to whole
+    // hours, so a slow launch does not change it.
+    joplin.writePluginSettings({ backupInterval: 24 });
+    backdateLastBackup(joplin, 36 * HOUR_MS);
+    await launchExpectingNoRun(/scheduling the next run in 12h/);
     expect(await snapshotNames()).toEqual(snapshots);
   });
 });

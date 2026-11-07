@@ -26,13 +26,13 @@ import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { listSnapshots } from '../src/retention';
 import {
-  backdateLastBackup as backdate,
+  backdateLastBackup,
   exists,
-  expectSnapshotIntact as expectIntact,
-  inode as inodeIn,
-  launchAndAwaitBackup as launchAndAwait,
+  expectSnapshotIntact,
+  inode,
+  launchAndAwaitBackup,
   makeWorkDir,
-  readLatest as readLatestIn,
+  readLatest,
   removeWorkDir,
 } from './helpers';
 import { JoplinInstance } from './joplin';
@@ -68,12 +68,6 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   const snapshots: string[] = [];
 
   const snapshotNames = () => listSnapshots(backupDir);
-  const launchAndAwaitBackup = (expectedStatus: 'success' | 'skipped' | 'failed') =>
-    launchAndAwait(joplin, backupDir, expectedStatus);
-  const backdateLastBackup = () => backdate(joplin);
-  const readLatest = () => readLatestIn(backupDir);
-  const expectSnapshotIntact = (snapshot: string) => expectIntact(backupDir, snapshot);
-  const inode = (snapshot: string, rel: string) => inodeIn(backupDir, snapshot, rel);
 
   /**
    * Where the last run exported, from the plugin's log: locally (and cleaned up
@@ -142,8 +136,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   });
 
   async function cleanUp(): Promise<void> {
-    const otherDevice = backupParent && backupParent !== workDir ? [backupParent] : [];
-    await removeWorkDir(workDir, failed, otherDevice);
+    const extraDirs = backupParent && backupParent !== workDir ? [backupParent] : [];
+    await removeWorkDir(workDir, failed, { backupDir, extraDirs });
   }
 
   // Steps build on each other; stop at the first failure.
@@ -192,7 +186,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
 
   it('takes a first snapshot on the startup schedule', async () => {
     joplin.writePluginSettings({ backupPath: backupDir, stageLocally: mode.stageLocally });
-    const record = await launchAndAwaitBackup('success');
+    const record = await launchAndAwaitBackup(joplin, backupDir, 'success');
 
     const names = await snapshotNames();
     expect(names).toHaveLength(1);
@@ -200,7 +194,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     snapshots.push(names[0]);
     const snapshotDir = path.join(backupDir, names[0]);
 
-    expect(await readLatest()).toBe(names[0]);
+    expect(await readLatest(backupDir)).toBe(names[0]);
     expect(await exists(path.join(backupDir, '.joplin-incremental-backup'))).toBe(true);
 
     // Every item is in the Raw export layout.
@@ -226,7 +220,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     );
 
     // The manifest describes every file exactly.
-    const manifest = await expectSnapshotIntact(names[0]);
+    const manifest = await expectSnapshotIntact(backupDir, names[0]);
     expect(manifest.snapshotId).toBe(names[0]);
     expect(manifest.joplinVersion).toMatch(/^\d+\.\d+\.\d+/);
 
@@ -244,8 +238,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   });
 
   it('takes a deduplicated second snapshot on catch-up', async () => {
-    backdateLastBackup();
-    const { changes } = await launchAndAwaitBackup('success');
+    backdateLastBackup(joplin);
+    const { changes } = await launchAndAwaitBackup(joplin, backupDir, 'success');
     await joplin.stop();
     await expectStaging();
 
@@ -254,25 +248,29 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     const [first, second] = names;
     expect(first).toBe(snapshots[0]);
     snapshots.push(second);
-    expect(await readLatest()).toBe(second);
+    expect(await readLatest(backupDir)).toBe(second);
 
     const inFirst = (rel: string) => path.join(backupDir, first, rel);
     const inSecond = (rel: string) => path.join(backupDir, second, rel);
 
     // Unchanged files are hardlinks to the previous snapshot.
-    const manifest = await expectSnapshotIntact(second);
+    const manifest = await expectSnapshotIntact(backupDir, second);
     expect(manifest.deduplication).toBe('hardlink');
     const resourcePath = manifest.files
       .map((f) => f.path)
       .find((p) => p.startsWith(`resources/${ids.resource}`));
     expect(resourcePath).toBeDefined();
     for (const rel of [`${ids.unchangedNote}.md`, `${ids.folder}.md`, resourcePath!]) {
-      expect(await inode(second, rel), `${rel} should be hardlinked`).toBe(await inode(first, rel));
+      expect(await inode(backupDir, second, rel), `${rel} should be hardlinked`).toBe(
+        await inode(backupDir, first, rel),
+      );
     }
 
     // The edited note is a new file with the new content.
     const editedRel = `${ids.editedNote}.md`;
-    expect(await inode(second, editedRel)).not.toBe(await inode(first, editedRel));
+    expect(await inode(backupDir, second, editedRel)).not.toBe(
+      await inode(backupDir, first, editedRel),
+    );
     expect(await fs.readFile(inSecond(editedRel), 'utf8')).toContain('Edited body.');
     expect(await fs.readFile(inFirst(editedRel), 'utf8')).toContain('Original body.');
 
@@ -289,8 +287,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
   });
 
   it('skips the run when nothing changed', async () => {
-    backdateLastBackup();
-    await launchAndAwaitBackup('skipped');
+    backdateLastBackup(joplin);
+    await launchAndAwaitBackup(joplin, backupDir, 'skipped');
     // A tag-only change for the next step, made while the app is up.
     await joplin.tagNote(ids.tag, ids.editedNote);
     await joplin.stop();
@@ -301,8 +299,8 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
 
   it('detects a tag-only change', async () => {
     // The previous step tagged a note and changed nothing else.
-    backdateLastBackup();
-    const { changes, snapshotName } = await launchAndAwaitBackup('success');
+    backdateLastBackup(joplin);
+    const { changes, snapshotName } = await launchAndAwaitBackup(joplin, backupDir, 'success');
     // Change the vault for the retention step while the app is up.
     await joplin.updateNote(ids.addedNote, { body: 'Brand new, edited.' });
     await joplin.stop();
@@ -318,26 +316,26 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     const link = await fs.readFile(path.join(backupDir, snapshotName!, changes!.added[0]), 'utf8');
     expect(link).toContain(`note_id: ${ids.editedNote}`);
     expect(link).toContain(`tag_id: ${ids.tag}`);
-    await expectSnapshotIntact(snapshotName!);
+    await expectSnapshotIntact(backupDir, snapshotName!);
   });
 
   it('prunes old snapshots without damaging the ones it keeps', async () => {
     joplin.writePluginSettings({ backupRetention: 2 });
-    backdateLastBackup();
-    const { snapshotName } = await launchAndAwaitBackup('success');
+    backdateLastBackup(joplin);
+    const { snapshotName } = await launchAndAwaitBackup(joplin, backupDir, 'success');
     await joplin.stop();
 
     const kept = [snapshots[snapshots.length - 1], snapshotName!];
     expect(await snapshotNames()).toEqual(kept);
-    expect(await readLatest()).toBe(kept[1]);
+    expect(await readLatest(backupDir)).toBe(kept[1]);
     snapshots.splice(0, snapshots.length, ...kept);
 
     // The survivors shared hardlinks with the pruned snapshots; every file
     // must still be present and intact.
-    for (const snapshot of kept) await expectSnapshotIntact(snapshot);
+    for (const snapshot of kept) await expectSnapshotIntact(backupDir, snapshot);
     const unchanged = `${ids.unchangedNote}.md`;
-    expect(await inode(kept[1], unchanged), `${unchanged} still hardlinked`).toBe(
-      await inode(kept[0], unchanged),
+    expect(await inode(backupDir, kept[1], unchanged), `${unchanged} still hardlinked`).toBe(
+      await inode(backupDir, kept[0], unchanged),
     );
   });
 
@@ -345,12 +343,12 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     // What an unmounted drive looks like: the configured directory is gone.
     const unmounted = `${backupDir}.unmounted`;
     const lastSnapshot = joplin.readPluginSetting('lastSnapshot');
-    const latest = await readLatest();
+    const latest = await readLatest(backupDir);
     await fs.rename(backupDir, unmounted);
     let recreated: boolean;
     try {
-      const lastBackup = backdateLastBackup();
-      const record = await launchAndAwaitBackup('failed');
+      const lastBackup = backdateLastBackup(joplin);
+      const record = await launchAndAwaitBackup(joplin, backupDir, 'failed');
       await joplin.stop();
 
       expect(record.error).toContain('is not available');
@@ -369,6 +367,6 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
 
     expect(recreated, 'backup directory must not be recreated').toBe(false);
     expect(await snapshotNames()).toEqual(snapshots);
-    expect(await readLatest()).toBe(latest);
+    expect(await readLatest(backupDir)).toBe(latest);
   });
 });

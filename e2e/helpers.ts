@@ -9,7 +9,7 @@ import path from 'path';
 import { expect } from 'vitest';
 import type { BackupChanges } from '../src/backup';
 import type { Manifest } from '../src/manifest';
-import { JoplinInstance, waitFor } from './joplin';
+import { JoplinInstance, sleep, waitFor } from './joplin';
 
 export const BACKUP_TIMEOUT_MS = 120_000;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -65,17 +65,18 @@ export async function makeWorkDir(slug: string): Promise<string> {
 /**
  * Remove a scenario's work directory and `extraDirs` (directories it uses
  * outside it), unless the scenario failed or `JOPLIN_E2E_KEEP` is set: then
- * say where they are. A work directory under `JOPLIN_E2E_WORKDIR` is kept.
+ * say where they are and where its backups are. A work directory under
+ * `JOPLIN_E2E_WORKDIR` is kept.
  */
 export async function removeWorkDir(
   workDir: string | undefined,
   failed: boolean,
-  extraDirs: string[] = [],
+  { backupDir, extraDirs = [] }: { backupDir?: string; extraDirs?: string[] } = {},
 ): Promise<void> {
   if (!workDir) return;
   if (failed || process.env.JOPLIN_E2E_KEEP) {
-    const also = extraDirs.length > 0 ? ` (and ${extraDirs.join(', ')})` : '';
-    console.log(`Kept e2e work directory: ${workDir}${also}`);
+    const backups = backupDir ? ` (backups: ${backupDir})` : '';
+    console.log(`Kept e2e work directory: ${workDir}${backups}`);
     return;
   }
   for (const dir of extraDirs) await fs.rm(dir, { recursive: true, force: true });
@@ -162,6 +163,36 @@ export async function waitForLogLine(
     async () => (await joplin.pluginLog()).find((line) => pattern.test(line)),
     timeoutMs,
   );
+}
+
+/**
+ * `CATCH_UP_GRACE_MS` from src/scheduler.ts: how long after startup the
+ * scheduler starts a due backup.
+ */
+const CATCH_UP_GRACE_MS = 5_000;
+/** Extra time to watch for a run that must not start, beyond the grace period. */
+const NO_RUN_MARGIN_MS = 5_000;
+const RUN_STARTED = 'Starting backup run';
+
+/**
+ * Check that no backup run starts: watch the plugin log until the scheduler's
+ * startup grace period (counted from now) has passed with a margin, failing
+ * as soon as a run starts, then check no result was recorded since
+ * `resultBefore` (the `lastBackupResultJson` before launch).
+ */
+export async function expectNoRunStarted(
+  joplin: JoplinInstance,
+  resultBefore: string | undefined,
+): Promise<void> {
+  const deadline = Date.now() + CATCH_UP_GRACE_MS + NO_RUN_MARGIN_MS;
+  let started: string[] = [];
+  while (Date.now() < deadline) {
+    started = (await joplin.pluginLog()).filter((l) => l.includes(RUN_STARTED));
+    if (started.length > 0) break;
+    await sleep(500);
+  }
+  expect(started, 'no backup run started').toEqual([]);
+  expect(joplin.readPluginSetting('lastBackupResultJson')).toBe(resultBefore);
 }
 
 /**
