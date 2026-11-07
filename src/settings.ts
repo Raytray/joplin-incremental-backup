@@ -286,6 +286,19 @@ export function isSchedulerEnabled(
   return Number.isFinite(interval) && interval > 0;
 }
 
+/** Parse a persisted `lastBackup` timestamp; invalid values mean "never". */
+export function parseLastBackup(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return null;
+  return parsed;
+}
+
+/** Read only the persisted `lastBackup` timestamp (cheaper than `getSettings`). */
+export async function getLastBackup(): Promise<string> {
+  return String((await joplin.settings.value(SETTING_KEYS.lastBackup)) ?? '');
+}
+
 export async function setLastBackup(timestamp: string): Promise<void> {
   await joplin.settings.setValue(SETTING_KEYS.lastBackup, timestamp);
 }

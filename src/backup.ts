@@ -26,8 +26,10 @@ import type { DedupResult } from './dedup';
 import { listSnapshots, pruneSnapshots } from './retention';
 import {
   addInitializedBackupRoot,
+  getLastBackup,
   getSettings,
   isKnownBackupRoot,
+  parseLastBackup,
   requireBackupPath,
   setLastBackup,
   setLastSnapshot,
@@ -194,6 +196,11 @@ export interface BackupResult {
   duration?: string;
   /** Semantic change summary relative to the previous snapshot. */
   changes?: BackupChanges;
+  /**
+   * Set when the run was skipped because another backup was recorded after
+   * `skipIfBackedUpAfter`: that backup's `lastBackup` time, in ms since the epoch.
+   */
+  supersededBy?: number;
 }
 
 export interface BackupOptions {
@@ -215,6 +222,13 @@ export interface BackupOptions {
    * extra `stat` call.
    */
   computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
+  /**
+   * Skip the run if `lastBackup` is later than this time (ms since the epoch;
+   * `-Infinity` for "never backed up") once the lock is held. Scheduled runs
+   * pass the `lastBackup` their timer was armed with, so a backup that
+   * finished while they waited to start is not repeated.
+   */
+  skipIfBackedUpAfter?: number;
 }
 
 export interface VerifyResult {
@@ -778,6 +792,32 @@ async function recordFailure(startTime: number, finishedAt: Date, error: unknown
   }
 }
 
+/**
+ * The `lastBackup` time if a backup was recorded after `threshold`, else null.
+ * A failed read also gives null: the run then goes ahead, as it would without
+ * the check.
+ */
+async function backupRecordedAfter(threshold: number | undefined): Promise<number | null> {
+  if (threshold === undefined) return null;
+  try {
+    const latest = parseLastBackup(await getLastBackup());
+    return latest !== null && latest > threshold ? latest : null;
+  } catch (error) {
+    logger.warn('Could not read the last backup time; running the backup anyway.', error);
+    return null;
+  }
+}
+
+/** Skip result for a run made redundant by a backup recorded at `supersededBy`. */
+function supersededResult(supersededBy: number): BackupResult {
+  logger.info('Another backup finished while this one was starting; skipping.');
+  return {
+    status: 'skipped',
+    supersededBy,
+    message: 'Another backup finished while this one was starting; backup skipped.',
+  };
+}
+
 export async function runBackup(options: BackupOptions = {}): Promise<BackupResult> {
   const startTime = Date.now();
 
@@ -793,6 +833,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // there is provably not enough space.
     await assertDiskSpace(context.backupRoot, context.minFreeBytes);
   } catch (error) {
+    // A run made redundant by a backup that finished meanwhile is skipped,
+    // not failed: e.g. that backup may have just used the free space. (The
+    // check cannot move ahead of setup: the lock lives in the backup root,
+    // and setup is what refuses a root whose drive is missing.)
+    const supersededBy = await backupRecordedAfter(options.skipIfBackedUpAfter);
+    if (supersededBy !== null) return supersededResult(supersededBy);
+
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
@@ -805,6 +852,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
 
   try {
+    const supersededBy = await backupRecordedAfter(options.skipIfBackedUpAfter);
+    if (supersededBy !== null) return supersededResult(supersededBy);
+
     logger.info('Starting backup run...');
     void joplin.views.dialogs
       .showToast({ message: 'Backup started…', type: ToastType.Info })
