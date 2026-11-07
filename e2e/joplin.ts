@@ -12,7 +12,7 @@
 import { spawn } from 'child_process';
 import type { ChildProcess } from 'child_process';
 import { randomBytes } from 'crypto';
-import { createWriteStream, existsSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, realpathSync } from 'fs';
 import fs from 'fs/promises';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
@@ -26,6 +26,9 @@ const CLIPPER_PORTS = Array.from({ length: 10 }, (_, i) => 41184 + i);
 const START_TIMEOUT_MS = 120_000;
 const STOP_TIMEOUT_MS = 30_000;
 const POLL_INTERVAL_MS = 500;
+/** The database counts as idle once no write transaction has been open for this long. */
+const DB_IDLE_MS = 1_000;
+const DB_IDLE_TIMEOUT_MS = 15_000;
 
 export function joplinBinary(): string {
   const bin = process.env.JOPLIN_BIN ?? path.join(REPO_ROOT, '.cache/joplin/current/joplin');
@@ -35,6 +38,44 @@ export function joplinBinary(): string {
     );
   }
   return bin;
+}
+
+const flagSupport = new Map<string, Promise<boolean>>();
+
+/**
+ * Whether this Joplin build knows a start-up flag. Joplin exits on flags it
+ * does not recognise, and some (e.g. `--running-tests`, absent from 3.2) are
+ * newer than the oldest supported version. The app's code ships uncompressed
+ * in resources/app.asar, so the flag's name appears there iff it is parsed.
+ */
+export function joplinAcceptsFlag(bin: string, flag: string): Promise<boolean> {
+  const asar = path.join(path.dirname(realpathSync(bin)), 'resources', 'app.asar');
+  const key = `${asar}\0${flag}`;
+  let result = flagSupport.get(key);
+  if (!result) {
+    result = containsBytes(asar, Buffer.from(flag));
+    flagSupport.set(key, result);
+  }
+  return result;
+}
+
+/** Stream `file` looking for `needle`, keeping an overlap across chunk boundaries. */
+function containsBytes(file: string, needle: Buffer): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const stream = createReadStream(file);
+    let tail = Buffer.alloc(0);
+    stream.on('data', (chunk: string | Buffer) => {
+      const window = Buffer.concat([tail, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+      if (window.includes(needle)) {
+        stream.destroy();
+        resolve(true);
+        return;
+      }
+      tail = window.subarray(Math.max(0, window.length - needle.length + 1));
+    });
+    stream.on('end', () => resolve(false));
+    stream.on('error', reject);
+  });
 }
 
 export function pluginSettingKey(key: string): string {
@@ -135,18 +176,21 @@ export class JoplinInstance {
     const logPath = this.launchLogPath;
     const log = createWriteStream(logPath);
 
+    const bin = joplinBinary();
     const child = spawn(
-      joplinBinary(),
+      bin,
       [
         // The extracted AppImage's chrome-sandbox is not setuid, and CI
         // runners restrict unprivileged user namespaces.
         '--no-sandbox',
         '--disable-gpu',
-        // Disables the single-instance lock, so a Joplin the developer
-        // already has open does not swallow this instance.
-        '--running-tests',
+        // Newer Joplin (e.g. 3.7) locks the profile and refuses to start it
+        // again for a few seconds after a forced quit; this flag turns that
+        // off. Older versions (e.g. 3.2) do not know the flag and use
+        // Electron's single-instance lock, which the isolated HOME already
+        // keeps apart from a Joplin the developer has open.
+        ...((await joplinAcceptsFlag(bin, '--running-tests')) ? ['--running-tests'] : []),
         '--no-welcome',
-        '--lang=en-GB',
         '--log-level',
         'debug',
         // Electron copies renderer console output (the plugin's logger) to
@@ -223,6 +267,7 @@ export class JoplinInstance {
       return;
     }
     const pid = child.pid;
+    await this.waitForDatabaseIdle();
     const killGroup = (signal: NodeJS.Signals) => {
       try {
         process.kill(-pid, signal);
@@ -258,6 +303,25 @@ export class JoplinInstance {
     if (groupAlive()) {
       killGroup('SIGKILL');
       throw new Error(`Joplin's helper processes did not exit within ${STOP_TIMEOUT_MS} ms.`);
+    }
+  }
+
+  /**
+   * Wait until no write transaction has been open for DB_IDLE_MS. The Data
+   * API can answer before its write commits (seen on 3.2.11), and SIGTERM
+   * does not wait for it: the write is rolled back, leaving a hot journal.
+   * In Joplin's journal mode, database.sqlite-journal exists only while a
+   * write transaction is open. Gives up after DB_IDLE_TIMEOUT_MS, since a
+   * busy app (e.g. indexing) is still better stopped than waited on forever.
+   */
+  private async waitForDatabaseIdle(): Promise<void> {
+    const journal = `${this.databasePath}-journal`;
+    const deadline = Date.now() + DB_IDLE_TIMEOUT_MS;
+    let idleSince = Date.now();
+    while (Date.now() < deadline) {
+      if (existsSync(journal)) idleSince = Date.now();
+      else if (Date.now() - idleSince >= DB_IDLE_MS) return;
+      await sleep(50);
     }
   }
 
