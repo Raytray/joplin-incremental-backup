@@ -230,6 +230,12 @@ export async function dedup(
     },
   );
 
+  return { ...countModes(modes), hashes };
+}
+
+function countModes(
+  modes: ReadonlyArray<DeduplicationMode | 'failed' | null>,
+): Omit<DedupResult, 'hashes'> {
   let hardlinked = 0;
   let copied = 0;
   let unchanged = 0;
@@ -242,5 +248,105 @@ export async function dedup(
     else unchanged += 1;
   }
 
-  return { hardlinked, copied, unchanged, failed, hashes };
+  return { hardlinked, copied, unchanged, failed };
+}
+
+/** Create `targetDir` and a copy of every directory under `sourceDir` in it, without files. */
+async function mirrorDirectories(sourceDir: string, targetDir: string): Promise<void> {
+  await fs.mkdir(targetDir, { recursive: true });
+  for (const entry of await fs.readdir(sourceDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      await mirrorDirectories(path.join(sourceDir, entry.name), path.join(targetDir, entry.name));
+    }
+  }
+}
+
+/**
+ * Build `targetDir` from an export staged in `localDir`: each file identical
+ * to one in the previous snapshot is hardlinked to it, and every other file is
+ * copied from `localDir`. Only new or changed content is written to the
+ * target's drive.
+ *
+ * Hashes are computed on the local copies. When the target cannot hardlink,
+ * matched files are copied too (`copied`); a link that fails on a filesystem
+ * that supports links is also copied, and counted as `failed`.
+ */
+export async function stageFromLocal(
+  localDir: string,
+  targetDir: string,
+  previousSnapshotDir: string | null,
+  previousManifest: Manifest | null,
+  files: readonly string[],
+  options: DedupOptions = {},
+): Promise<DedupResult> {
+  const index = buildContentIndex(previousManifest);
+  const hashes = new Map<string, string>();
+  const computeHash = options.computeHash ?? computeFileSha256;
+  /** Settled by the first link attempt of the run, as in `dedup`. */
+  let linkSupport: Promise<boolean> | null = null;
+
+  // Mirror every directory of the export, empty ones included (the RAW
+  // exporter always creates `resources/`), so the snapshot has the same layout
+  // as one staged on the backup drive.
+  await mirrorDirectories(localDir, targetDir);
+
+  const modes = await mapWithConcurrency(
+    files,
+    DEDUP_CONCURRENCY,
+    async (relativePath): Promise<DeduplicationMode | 'failed' | null> => {
+      const key = toManifestKey(relativePath);
+      const localPath = path.join(localDir, relativePath);
+      const targetPath = path.join(targetDir, relativePath);
+      const sha256 = await computeHash(localPath, options.fileSizes?.get(key));
+      hashes.set(key, sha256);
+
+      const match = previousSnapshotDir
+        ? findMatch(index, toDedupeKey(relativePath), sha256)
+        : null;
+      const sourcePath =
+        match && previousSnapshotDir ? path.join(previousSnapshotDir, match.path) : null;
+      if (!sourcePath || !(await fileExists(sourcePath))) {
+        await fs.copyFile(localPath, targetPath);
+        return null;
+      }
+
+      if (linkSupport && !(await linkSupport)) {
+        await fs.copyFile(localPath, targetPath);
+        return 'copy';
+      }
+
+      let linkError: unknown = null;
+      if (linkSupport) {
+        linkError = await fs.link(sourcePath, targetPath).then(
+          () => null,
+          (error: unknown) => error,
+        );
+      } else {
+        // First link of the run: it decides for everyone else. An
+        // "unsupported" error is confirmed with canHardlink before linking is
+        // turned off; any other error is per-file and counts as supported.
+        const attempt = fs.link(sourcePath, targetPath).then(
+          () => null,
+          (error: unknown) => error,
+        );
+        linkSupport = attempt
+          .then(
+            (error) =>
+              error === null ||
+              !isHardlinkUnsupportedError(error) ||
+              canHardlink(sourcePath, path.dirname(targetPath)),
+          )
+          .catch(() => true);
+        linkError = await attempt;
+      }
+      if (linkError === null) return 'hardlink';
+
+      await fs.copyFile(localPath, targetPath);
+      if (!(await linkSupport)) return 'copy';
+      logger.warn(`Could not hardlink "${relativePath}"; copied it instead.`, linkError);
+      return 'failed';
+    },
+  );
+
+  return { ...countModes(modes), hashes };
 }

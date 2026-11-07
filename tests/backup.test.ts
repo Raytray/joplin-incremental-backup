@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('fs/promises', async () => {
   const memfs = await import('memfs');
@@ -23,6 +23,7 @@ import {
   isTransientExportError,
   LATEST_FILENAME,
   listStagingDirs,
+  LOCAL_STAGING_DIR_NAME,
   LOCK_FILENAME,
   prepareBackupRoot,
   recoverBackupDirs,
@@ -1325,5 +1326,203 @@ describe('runBackup — result timestamps', () => {
 
     expect(lastResult()).toMatch(new RegExp(`^${injectedIso} — failed — .* — boom$`));
     expect(lastRecord().finishedAt).toBe(injectedIso);
+  });
+});
+
+describe('runBackup — local staging', () => {
+  const LOCAL_ROOT = path.join(mockState.dataDir, LOCAL_STAGING_DIR_NAME);
+  const SNAPSHOT_ROOT = path.join(BACKUP_ROOT, PROFILE);
+
+  /** Directories `exportFolders` was asked to write into. */
+  function exportTargets(): string[] {
+    return mockState.executedCommands
+      .filter((command) => command.name === 'exportFolders')
+      .map((command) => String(command.args[2]));
+  }
+
+  /**
+   * memfs reports one device for every path. Put the local staging root on
+   * another one, as on a machine whose backup drive is a separate disk.
+   */
+  function putLocalRootOnOwnDevice(): void {
+    const realStat = fs.stat.bind(fs) as (target: string) => Promise<{ dev: number }>;
+    vi.spyOn(fs, 'stat').mockImplementation((async (target: string) => {
+      const stats = await realStat(target);
+      if (path.resolve(String(target)) === LOCAL_ROOT) stats.dev = Number(stats.dev) + 1;
+      return stats;
+    }) as unknown as typeof fs.stat);
+  }
+
+  beforeEach(() => {
+    setSettings({ [SETTING_KEYS.stageLocally]: true, [SETTING_KEYS.onlyOnChange]: false });
+    putLocalRootOnOwnDevice();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('stages on the backup drive, without a warning, when both are on the same disk', async () => {
+    vi.restoreAllMocks();
+    const warn = vi.spyOn(logger, 'warn');
+
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(false);
+    expect(path.dirname(exportTargets()[0])).toBe(SNAPSHOT_ROOT);
+    expect(result.warnings).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the backup drive, with a warning, when the local export fails', async () => {
+    const writeFile = stubExportThatFailsUnder(LOCAL_ROOT);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const result = await run();
+
+    expect(writeFile).toHaveBeenCalled();
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(false);
+    expect(exportTargets().map((target) => path.dirname(target))).toEqual([
+      LOCAL_ROOT,
+      SNAPSHOT_ROOT,
+    ]);
+    expect(result.warnings).toEqual([expect.stringContaining('disk full')]);
+    expect(await fs.readFile(path.join(result.snapshotDir!, 'n1.md'), 'utf8')).toBe('hello');
+    expect(await fs.readdir(LOCAL_ROOT)).toEqual([]);
+  });
+
+  /** An export that fails with ENOSPC when written under `root`. */
+  function stubExportThatFailsUnder(root: string) {
+    const attempt = vi.fn();
+    mockState.commandHandlers.exportFolders = async (
+      _ids: unknown,
+      _format: unknown,
+      target: unknown,
+    ) => {
+      const dir = String(target);
+      if (dir.startsWith(root)) {
+        attempt();
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+      }
+      await fs.writeFile(path.join(dir, 'n1.md'), 'hello');
+    };
+    return attempt;
+  }
+
+  it('exports into the plugin data directory and writes the snapshot to the backup drive', async () => {
+    const result = await run();
+
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(true);
+    const [target] = exportTargets();
+    expect(path.dirname(target)).toBe(LOCAL_ROOT);
+    expect(path.basename(target).startsWith(ACTIVE_DIR_PREFIX)).toBe(true);
+    expect(await fs.readFile(path.join(result.snapshotDir!, 'n1.md'), 'utf8')).toBe('hello');
+    const manifest = await readManifest(result.snapshotDir!);
+    expect(manifest?.files).toEqual([{ path: 'n1.md', size: 5, sha256: sha256('hello') }]);
+    // Nothing is left behind locally or on the backup drive.
+    expect(await fs.readdir(LOCAL_ROOT)).toEqual([]);
+    expect(await listStagingDirs(SNAPSHOT_ROOT)).toEqual([]);
+  });
+
+  it('hardlinks unchanged files and copies only changed ones from the local export', async () => {
+    stubExport([
+      { path: 'n1.md', content: 'hello' },
+      { path: 'n2.md', content: 'v1' },
+    ]);
+    const first = await run();
+
+    stubExport([
+      { path: 'n1.md', content: 'hello' },
+      { path: 'n2.md', content: 'v2' },
+    ]);
+    const copySpy = vi.spyOn(fs, 'copyFile');
+    const second = await run({ now: new Date('2026-01-03T00:00:00.000Z') });
+
+    expect(second).toMatchObject({ hardlinked: 1, unchanged: 1, stagedLocally: true });
+    expect(second.changes?.modified).toEqual(['n2.md']);
+    expect(copySpy.mock.calls.map(([source]) => path.basename(String(source)))).toEqual(['n2.md']);
+    const [linked, original] = await Promise.all([
+      fs.stat(path.join(second.snapshotDir!, 'n1.md')),
+      fs.stat(path.join(first.snapshotDir!, 'n1.md')),
+    ]);
+    expect(linked.ino).toBe(original.ino);
+    expect(await fs.readFile(path.join(second.snapshotDir!, 'n2.md'), 'utf8')).toBe('v2');
+  });
+
+  it('stages on the backup drive, with a warning, when the local folder cannot be used', async () => {
+    const blocker = '/not-a-directory';
+    await fs.writeFile(blocker, '');
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    const result = await run({ localStagingRoot: path.join(blocker, 'staging') });
+
+    expect(result.status).toBe('success');
+    expect(result.stagedLocally).toBe(false);
+    expect(path.dirname(exportTargets()[0])).toBe(SNAPSHOT_ROOT);
+    expect(result.warnings).toEqual([
+      expect.stringContaining('could not be staged on this computer'),
+    ]);
+    expect(result.message).toContain('could not be staged locally');
+    expect(await fs.readFile(path.join(result.snapshotDir!, 'n1.md'), 'utf8')).toBe('hello');
+  });
+
+  it('stages on the backup drive when the local disk lacks room for the previous snapshot', async () => {
+    const first = await run();
+    expect(first.stagedLocally).toBe(true);
+
+    // Room for the minimum free space everywhere, but not for another copy
+    // of the vault on the local disk.
+    const MIB = 1024 * 1024;
+    vi.spyOn(fs, 'statfs').mockImplementation((async (target: string) => ({
+      bsize: 1,
+      bavail: String(target).startsWith(LOCAL_ROOT) ? 2 * MIB : 1024 * MIB,
+    })) as unknown as typeof fs.statfs);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+
+    // The previous snapshot is 5 bytes: 1 MiB + 5 B fits, so use a minimum
+    // that leaves less than the snapshot's size spare.
+    const second = await run({
+      now: new Date('2026-01-03T00:00:00.000Z'),
+      minFreeBytes: 2 * MIB - 2,
+    });
+
+    expect(second.stagedLocally).toBe(false);
+    expect(path.dirname(exportTargets()[1])).toBe(SNAPSHOT_ROOT);
+  });
+
+  it('does not stage locally when the setting is off', async () => {
+    setSettings({ [SETTING_KEYS.stageLocally]: false, [SETTING_KEYS.onlyOnChange]: false });
+
+    const result = await run();
+
+    expect(result.stagedLocally).toBe(false);
+    expect(path.dirname(exportTargets()[0])).toBe(SNAPSHOT_ROOT);
+  });
+
+  it('removes the local export when the run fails', async () => {
+    vi.spyOn(fs, 'copyFile').mockRejectedValue(
+      Object.assign(new Error('no space'), { code: 'ENOSPC' }),
+    );
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+
+    await expect(run()).rejects.toThrow('no space');
+
+    expect(await fs.readdir(LOCAL_ROOT)).toEqual([]);
+    expect(await listStagingDirs(SNAPSHOT_ROOT)).toEqual([]);
+  });
+
+  it('recoverBackupDirs clears local staging left by a crash, even with the setting off', async () => {
+    setSettings({ [SETTING_KEYS.stageLocally]: false });
+    const leftover = path.join(LOCAL_ROOT, createStagingDirName());
+    await fs.mkdir(leftover, { recursive: true });
+    await fs.writeFile(path.join(leftover, 'n1.md'), 'partial');
+    await fs.writeFile(path.join(LOCAL_ROOT, 'unrelated.txt'), 'keep');
+
+    await recoverBackupDirs({ backupRoot: SNAPSHOT_ROOT });
+
+    expect(await fs.readdir(LOCAL_ROOT)).toEqual(['unrelated.txt']);
   });
 });

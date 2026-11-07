@@ -40,6 +40,7 @@ function makeSettings(backupInterval: number, lastBackup = '', backupPath = BACK
     backupRetention: 5,
     backupInterval,
     onlyOnChange: true,
+    stageLocally: false,
     lastBackup,
     lastSnapshot: '',
     initializedBackupRoots: [],

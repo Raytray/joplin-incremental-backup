@@ -11,6 +11,7 @@ export const SETTING_KEYS = {
   backupRetention: 'backupRetention',
   backupInterval: 'backupInterval',
   onlyOnChange: 'onlyOnChange',
+  stageLocally: 'stageLocally',
   lastBackup: 'lastBackup',
   lastSnapshot: 'lastSnapshot',
   // Human-readable summary of the most recent backup run, shown in Options.
@@ -31,6 +32,8 @@ export interface Settings {
   backupRetention: number;
   backupInterval: number;
   onlyOnChange: boolean;
+  /** Export to a local folder first and write only new or changed files to the backup directory. */
+  stageLocally: boolean;
   lastBackup: string;
   lastSnapshot: string;
   lastBackupResult?: string;
@@ -79,6 +82,19 @@ export function buildSettings(): Record<string, SettingItem> {
       section: SETTING_SECTION_NAME,
       label: 'Only back up when something changed',
       description: 'Skip creating a snapshot when the data fingerprint is unchanged.',
+    },
+    [SETTING_KEYS.stageLocally]: {
+      value: false,
+      type: SettingItemType.Bool,
+      public: true,
+      advanced: true,
+      section: SETTING_SECTION_NAME,
+      label: 'Stage the export on this computer',
+      description:
+        'Export into a temporary folder in the Joplin profile first, then write only new or ' +
+        'changed files to the backup directory. Saves time and wear on slow or flash backup ' +
+        'drives, but needs free local space about the size of the vault. If the local folder ' +
+        'cannot be used, the backup is staged on the backup drive as usual.',
     },
     [SETTING_KEYS.lastBackup]: {
       value: '',
@@ -257,6 +273,7 @@ export async function getSettings(): Promise<Settings> {
     backupRetention: clampRetention(values[SETTING_KEYS.backupRetention]),
     backupInterval: normalizeInterval(values[SETTING_KEYS.backupInterval]),
     onlyOnChange: values[SETTING_KEYS.onlyOnChange] !== false,
+    stageLocally: values[SETTING_KEYS.stageLocally] === true,
     lastBackup: String(values[SETTING_KEYS.lastBackup] ?? ''),
     lastSnapshot: String(values[SETTING_KEYS.lastSnapshot] ?? ''),
     lastBackupResult: String(values[SETTING_KEYS.lastBackupResult] ?? ''),
