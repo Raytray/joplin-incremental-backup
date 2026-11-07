@@ -436,7 +436,10 @@ export class JoplinInstance {
     return resource;
   }
 
-  async updateNote(id: string, props: { title?: string; body?: string }): Promise<JoplinApiItem> {
+  async updateNote(
+    id: string,
+    props: { title?: string; body?: string; parent_id?: string },
+  ): Promise<JoplinApiItem> {
     const note = await this.api<JoplinApiItem>('PUT', `notes/${id}`, props);
     const columns = Object.keys(props) as (keyof typeof props)[];
     await this.awaitCommitted(
@@ -445,6 +448,26 @@ export class JoplinInstance {
       [id, ...columns.map((c) => props[c] as string)],
     );
     return note;
+  }
+
+  async updateFolder(id: string, props: { title: string }): Promise<JoplinApiItem> {
+    const folder = await this.api<JoplinApiItem>('PUT', `folders/${id}`, props);
+    await this.awaitCommitted(
+      `update of folder ${id}`,
+      'SELECT 1 FROM folders WHERE id = ? AND title = ?',
+      [id, props.title],
+    );
+    return folder;
+  }
+
+  /** Move a note to the trash, from where it can still be restored. */
+  async trashNote(id: string): Promise<void> {
+    await this.api('DELETE', `notes/${id}`);
+    await this.awaitCommitted(
+      `trashing of note ${id}`,
+      'SELECT 1 FROM notes WHERE id = ? AND deleted_time > 0',
+      [id],
+    );
   }
 
   async deleteNotePermanently(id: string): Promise<void> {

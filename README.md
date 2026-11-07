@@ -130,6 +130,8 @@ npm run updateVersion # sync version from package.json into the manifest
 
 `e2e/` runs the built plugin inside a real Joplin desktop app with a throwaway profile. The tests add notes through Joplin's Data API, let the scheduler take the backups, and check the snapshots on disk (Raw layout, manifest hashes, hardlinks between snapshots, change summary, skipped runs). The scenario runs twice: once staging on the backup drive, and once with **Stage the export on this computer** on. For the second run the backups go on another filesystem (`/dev/shm` by default, override with `JOPLIN_E2E_OTHER_DEVICE`), since local staging is skipped when both are on the same disk.
 
+A second scenario (`e2e/startup.e2e.test.ts`) covers what happens at startup: automatic backups paused without a usable directory, the upgrade guard for a missing drive, cleanup after a crashed run (stale lock and staging directories), backing off from another instance's lock, **Only back up when something changed** turned off, and the schedule not running a backup when it is turned off or not yet due. It also checks how moved notes, renamed notebooks, trashed notes and new attachments show up in a snapshot.
+
 ```bash
 npm run fetch-joplin          # download + verify + extract Joplin (default 3.7.22) into .cache/joplin/
 npm run test:e2e              # builds the plugin, then runs e2e/ in a visible Joplin window
