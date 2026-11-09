@@ -11,6 +11,7 @@ import { vol } from 'memfs';
 import {
   CATCH_UP_GRACE_MS,
   createScheduler,
+  FAILURE_BACKOFF_MS,
   HOUR_IN_MS,
   initScheduler,
   isSchedulerRunning,
@@ -302,6 +303,92 @@ describe('Scheduler re-arming', () => {
   });
 });
 
+describe('Scheduler — repeated failures', () => {
+  const MINUTE = 60 * 1000;
+
+  /**
+   * A scheduler whose runs follow `outcomes` ('fail', 'lock' or 'ok'), with
+   * the options of each call recorded. Returns the re-arm delay after each run.
+   */
+  function setup(outcomes: Array<'fail' | 'lock' | 'ok'>, intervalHours = 24) {
+    const manual = createManualTimers();
+    const calls: Array<BackupOptions | undefined> = [];
+    let index = 0;
+    const scheduler = createScheduler({
+      runBackup: async (options) => {
+        calls.push(options);
+        const outcome = outcomes[index++];
+        if (outcome === 'fail') throw new Error('drive missing');
+        if (outcome === 'lock') throw Object.assign(new Error('locked'), { code: 'EEXIST' });
+        return successResult();
+      },
+      setTimeoutFn: manual.setTimeoutFn,
+      clearTimeoutFn: manual.clearTimeoutFn,
+      loadSettings: async () => makeSettings(intervalHours),
+      now: () => NOW,
+    });
+    scheduler.start(intervalHours, new Date(NOW - 25 * HOUR_IN_MS).toISOString());
+
+    const runAll = async (): Promise<number[]> => {
+      for (let run = 1; run <= outcomes.length; run++) {
+        manual.fire(manual.last()!);
+        await vi.waitFor(() => expect(manual.timers).toHaveLength(run + 1));
+      }
+      return manual.timers.slice(1).map((timer) => timer.timeout);
+    };
+    return { scheduler, calls, runAll };
+  }
+
+  it('backs off 5m → 15m → 1h → the interval while failures repeat', async () => {
+    const { runAll } = setup(['fail', 'fail', 'fail', 'fail', 'fail']);
+    expect(await runAll()).toEqual([
+      5 * MINUTE,
+      15 * MINUTE,
+      60 * MINUTE,
+      24 * HOUR_IN_MS,
+      24 * HOUR_IN_MS,
+    ]);
+    expect(FAILURE_BACKOFF_MS[0]).toBe(RETRY_DELAY_MS);
+  });
+
+  it('only asks for a failure toast on the first failure in a row', async () => {
+    const { calls, runAll } = setup(['fail', 'fail', 'fail', 'ok', 'fail']);
+    await runAll();
+    expect(calls.map((options) => options?.notifyOnFailure)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      true,
+    ]);
+  });
+
+  it('starts over after a successful run', async () => {
+    const { runAll } = setup(['fail', 'fail', 'ok', 'fail']);
+    expect(await runAll()).toEqual([5 * MINUTE, 15 * MINUTE, 24 * HOUR_IN_MS, 5 * MINUTE]);
+  });
+
+  it('never waits longer than the interval', async () => {
+    const { runAll } = setup(['fail', 'fail', 'fail'], 0.5);
+    expect(await runAll()).toEqual([5 * MINUTE, 15 * MINUTE, 30 * MINUTE]);
+  });
+
+  it('does not count lock contention as a failure', async () => {
+    const { calls, runAll } = setup(['fail', 'lock', 'lock', 'fail']);
+    expect(await runAll()).toEqual([5 * MINUTE, 5 * MINUTE, 5 * MINUTE, 15 * MINUTE]);
+    expect(calls.map((options) => options?.notifyOnFailure)).toEqual([true, false, false, false]);
+  });
+
+  it('starts over when the settings change', async () => {
+    const { scheduler, calls, runAll } = setup(['fail', 'fail']);
+    await runAll();
+    scheduler.start(24, new Date(NOW - 25 * HOUR_IN_MS).toISOString());
+    // Nothing else is recorded about the restart: the next run toasts again.
+    await expect(scheduler.executeScheduledBackup()).resolves.toEqual(successResult());
+    expect(calls.at(-1)?.notifyOnFailure).toBe(true);
+  });
+});
+
 describe('Scheduler tick', () => {
   it('firing the timer calls runBackup once', async () => {
     const manual = createManualTimers();
@@ -495,7 +582,7 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     await flushEventLoop();
 
     expect(runBackupFn).toHaveBeenCalledTimes(1);
-    expect(runBackupFn.mock.calls[0][0]).toEqual({
+    expect(runBackupFn.mock.calls[0][0]).toMatchObject({
       skipIfBackedUpAfter: Date.parse(lastBackup),
     });
   });
@@ -515,7 +602,7 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     manual.fire(manual.timers[0]);
     await flushEventLoop();
 
-    expect(runBackupFn.mock.calls[0][0]).toEqual({
+    expect(runBackupFn.mock.calls[0][0]).toMatchObject({
       skipIfBackedUpAfter: Number.NEGATIVE_INFINITY,
     });
   });
@@ -541,7 +628,7 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     await flushEventLoop();
 
     expect(runBackupFn).toHaveBeenCalledTimes(1);
-    expect(runBackupFn.mock.calls[0][0]).toEqual({
+    expect(runBackupFn.mock.calls[0][0]).toMatchObject({
       skipIfBackedUpAfter: Number.NEGATIVE_INFINITY,
     });
   });
@@ -572,7 +659,7 @@ describe('Scheduler — another backup ran since the timer was armed', () => {
     await flushEventLoop();
 
     expect(runBackupFn).toHaveBeenCalledTimes(2);
-    expect(runBackupFn.mock.calls[1][0]).toEqual({ skipIfBackedUpAfter: NOW });
+    expect(runBackupFn.mock.calls[1][0]).toMatchObject({ skipIfBackedUpAfter: NOW });
   });
 
   it('runs when lastBackup is in the future (clock corrected backwards)', async () => {

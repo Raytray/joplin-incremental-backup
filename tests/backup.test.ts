@@ -430,6 +430,17 @@ describe('unset backup directory', () => {
     expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
     expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
   });
+
+  it('records the failure without a toast when notifyOnFailure is false', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup({ notifyOnFailure: false })).rejects.toThrow(
+      MISSING_BACKUP_PATH_MESSAGE,
+    );
+
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(false);
+  });
 });
 
 describe('relative backup directory', () => {

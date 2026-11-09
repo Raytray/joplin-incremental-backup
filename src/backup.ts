@@ -248,6 +248,13 @@ export interface BackupOptions {
    * Defaults to `staging/` under the plugin's data directory.
    */
   localStagingRoot?: string;
+  /**
+   * Show an error toast if the run fails (default `true`). The scheduler turns
+   * it off after the first of several failures in a row, so an unplugged
+   * drive does not raise a toast on every retry. The failure is still logged
+   * and recorded as the last backup result.
+   */
+  notifyOnFailure?: boolean;
 }
 
 export interface VerifyResult {
@@ -831,18 +838,25 @@ export async function prepareBackupRoot(
  * Log, toast and persist a failed run so "Show last backup result" reflects
  * it. Persistence errors are swallowed: they must never mask the original.
  */
-async function recordFailure(startTime: number, finishedAt: Date, error: unknown): Promise<void> {
+async function recordFailure(
+  startTime: number,
+  finishedAt: Date,
+  error: unknown,
+  notify: boolean,
+): Promise<void> {
   const durationMs = Date.now() - startTime;
   const duration = `${(durationMs / 1000).toFixed(1)}s`;
   const message = error instanceof Error ? error.message : String(error);
   logger.error('Backup failed.', error);
-  void joplin.views.dialogs
-    .showToast({
-      message: `Backup failed after ${duration}.`,
-      type: ToastType.Error,
-      duration: 6000,
-    })
-    .catch(() => undefined);
+  if (notify) {
+    void joplin.views.dialogs
+      .showToast({
+        message: `Backup failed after ${duration}.`,
+        type: ToastType.Error,
+        duration: 6000,
+      })
+      .catch(() => undefined);
+  }
   const finishedIso = finishedAt.toISOString();
   try {
     const record = JSON.stringify({
@@ -910,7 +924,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
-    await recordFailure(startTime, options.now ?? new Date(), error);
+    await recordFailure(
+      startTime,
+      options.now ?? new Date(),
+      error,
+      options.notifyOnFailure ?? true,
+    );
     throw error;
   }
   const { settings, backupRoot, lockPath, activeDir } = context;
@@ -1246,7 +1265,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    await recordFailure(startTime, options.now ?? new Date(), error);
+    await recordFailure(
+      startTime,
+      options.now ?? new Date(),
+      error,
+      options.notifyOnFailure ?? true,
+    );
     throw error;
   } finally {
     heartbeat.stop();

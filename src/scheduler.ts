@@ -27,8 +27,22 @@ export const CATCH_UP_OVERDUE_FACTOR = 2;
 /** Grace period before a startup catch-up export, so Joplin can finish loading. */
 export const CATCH_UP_GRACE_MS = 5 * 1000;
 
-/** Re-arm delay after a failed run — much sooner than a full interval. */
+/**
+ * Re-arm delay after a run that could not start because another backup was in
+ * progress, and after the first failure in a row.
+ */
 export const RETRY_DELAY_MS = 5 * 60 * 1000;
+
+/**
+ * Re-arm delays after the 1st, 2nd, 3rd… failure in a row. Once these run out,
+ * retries fall back to the regular interval. No delay is ever longer than the
+ * interval, and a successful run (or a settings change) starts over.
+ */
+export const FAILURE_BACKOFF_MS: readonly number[] = [
+  RETRY_DELAY_MS,
+  15 * 60 * 1000,
+  60 * 60 * 1000,
+];
 
 /**
  * Node's `setTimeout` fires *immediately* for delays above 2³¹−1 ms, so long
@@ -91,6 +105,11 @@ export class Scheduler {
    * `undefined` means it could not be read, so no run is skipped.
    */
   private observedLastBackup: number | undefined;
+  /**
+   * Scheduled runs that have failed in a row. Drives the retry backoff, and
+   * only the first failure in a row shows an error toast.
+   */
+  private consecutiveFailures = 0;
 
   private readonly runBackup: BackupRunner;
   private readonly setTimeoutFn: NonNullable<SchedulerDependencies['setTimeoutFn']>;
@@ -162,6 +181,8 @@ export class Scheduler {
   ): void {
     this.stop();
     this.observedLastBackup = parseLastBackup(observedLastBackupIso) ?? Number.NEGATIVE_INFINITY;
+    // New settings may have fixed the problem: if not, say so again.
+    this.consecutiveFailures = 0;
 
     if (!isSchedulerEnabled(intervalHours)) {
       this.intervalMs = 0;
@@ -206,7 +227,11 @@ export class Scheduler {
     this.armAt(lastBackupMs + this.intervalMs);
   }
 
-  /** Run a backup, skipping if one is already in flight. */
+  /**
+   * Run a backup, skipping if one is already in flight. Returns `null` when
+   * the run failed or could not start; only a real failure counts towards
+   * `consecutiveFailures`.
+   */
   async executeScheduledBackup(options?: BackupOptions): Promise<BackupResult | null> {
     if (this.running) {
       logger.warn('Scheduled backup already in progress; skipping this tick.');
@@ -215,17 +240,33 @@ export class Scheduler {
 
     this.running = true;
     try {
-      return await this.runBackup(options);
+      const result = await this.runBackup({
+        ...options,
+        notifyOnFailure: this.consecutiveFailures === 0,
+      });
+      this.consecutiveFailures = 0;
+      return result;
     } catch (error) {
       if (errorCode(error) === 'EEXIST') {
         logger.warn('Another backup holds the lock; skipping this scheduled run.');
       } else {
-        logger.error('Scheduled backup failed.', error);
+        this.consecutiveFailures += 1;
+        logger.error(
+          `Scheduled backup failed (${this.consecutiveFailures} in a row); ` +
+            `retrying in ${formatDuration(this.failureRetryDelay())}.`,
+          error,
+        );
       }
       return null;
     } finally {
       this.running = false;
     }
+  }
+
+  /** Re-arm delay after the current run of consecutive failures. */
+  private failureRetryDelay(): number {
+    const delay = FAILURE_BACKOFF_MS[this.consecutiveFailures - 1] ?? this.intervalMs;
+    return Math.min(delay, this.intervalMs);
   }
 
   /**
@@ -252,6 +293,8 @@ export class Scheduler {
     const latest = await this.readLastBackup();
     if (generation !== this.generation) return;
     if (observed !== undefined && latest !== undefined && latest > observed) {
+      // A backup succeeded, so the failure streak is over.
+      this.consecutiveFailures = 0;
       this.observedLastBackup = latest;
       this.armAt(latest + this.intervalMs);
       return;
@@ -259,6 +302,7 @@ export class Scheduler {
 
     // Repeat the check once the lock is held: a backup that was running when
     // this timer fired may finish while this one waits to start.
+    const failuresBefore = this.consecutiveFailures;
     const result = await this.executeScheduledBackup(
       observed === undefined ? undefined : { skipIfBackedUpAfter: observed },
     );
@@ -274,9 +318,10 @@ export class Scheduler {
     if (generation !== this.generation) return;
 
     if (result === null) {
-      // The run failed (or was skipped because another one was in flight).
-      // Retry much sooner than a full interval would.
-      this.armAt(this.now() + RETRY_DELAY_MS);
+      // Retry sooner than a full interval would: after a fixed delay when
+      // another run was in flight, backing off while failures repeat.
+      const failed = this.consecutiveFailures > failuresBefore;
+      this.armAt(this.now() + (failed ? this.failureRetryDelay() : RETRY_DELAY_MS));
       return;
     }
 
