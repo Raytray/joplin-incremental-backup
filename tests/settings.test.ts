@@ -198,6 +198,7 @@ describe('registerSettings', () => {
     expect(settings[SETTING_KEYS.stageLocally].public).toBe(true);
     expect(settings[SETTING_KEYS.lastBackup].public).toBe(false);
     expect(settings[SETTING_KEYS.lastSnapshot].public).toBe(false);
+    expect(settings[SETTING_KEYS.lastBackupResult].public).toBe(false);
   });
 
   it('registers retired keys as hidden and clears values left by older versions', async () => {

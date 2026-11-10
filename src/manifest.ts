@@ -3,6 +3,7 @@ import path from 'path';
 import {
   atomicWriteFile,
   collectFilesRecursive,
+  errorCode,
   hashFile,
   mapWithConcurrency,
   toManifestKey,
@@ -123,7 +124,7 @@ export async function readManifest(snapshotDir: string): Promise<Manifest | null
   try {
     raw = await fs.readFile(manifestPath, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (errorCode(error) === 'ENOENT') return null;
     throw error;
   }
 
@@ -151,15 +152,11 @@ export async function writeManifest(snapshotDir: string, manifest: Manifest): Pr
 export async function buildManifest(
   snapshotDir: string,
   meta: ManifestMeta,
-  filePaths?: readonly (string | { path: string; size: number })[],
+  fileList?: readonly { path: string; size: number }[],
   precomputedHashes?: ReadonlyMap<string, string>,
 ): Promise<Manifest> {
-  const entries = filePaths
-    ? filePaths.map((entry) =>
-        typeof entry === 'string'
-          ? { path: toManifestKey(entry), size: undefined }
-          : { path: toManifestKey(entry.path), size: entry.size },
-      )
+  const entries: Array<{ path: string; size: number | undefined }> = fileList
+    ? fileList.map((entry) => ({ path: toManifestKey(entry.path), size: entry.size }))
     : (await collectFilesRecursive(snapshotDir)).map((filePath) => ({
         path: toManifestKey(filePath),
         size: undefined,

@@ -89,12 +89,6 @@ async function paginate(
   }
 }
 
-export async function getChangeFingerprint(
-  options?: VaultInventoryOptions,
-): Promise<ChangeFingerprint> {
-  return (await collectVaultInventory(options)).fingerprint;
-}
-
 /**
  * SHA-256 over `key:value` pairs in sorted order, so the digest does not depend
  * on the order the API returned them in. Pairs are fed to the hash one at a

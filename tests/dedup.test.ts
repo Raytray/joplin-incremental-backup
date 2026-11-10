@@ -147,7 +147,7 @@ describe('dedup', () => {
     expect(await fs.readFile(path.join(ACTIVE, 'two.txt'), 'utf8')).toBe('same content');
   });
 
-  it('walks the active directory when no file list is provided', async () => {
+  it('hashes nested files and reports unmatched ones as unchanged', async () => {
     await writeFiles(PREVIOUS, [{ path: 'a.txt', content: 'hello' }]);
     await writeFiles(ACTIVE, [
       { path: 'a.txt', content: 'hello' },
@@ -155,7 +155,7 @@ describe('dedup', () => {
     ]);
     const manifest = makeManifest([{ path: 'a.txt', content: 'hello' }]);
 
-    const result = await dedup(ACTIVE, PREVIOUS, manifest);
+    const result = await dedup(ACTIVE, PREVIOUS, manifest, ['a.txt', 'nested/b.txt']);
 
     expect(result).toMatchObject({ hardlinked: 1, copied: 0, unchanged: 1 });
     expect([...result.hashes.keys()].sort()).toEqual(['a.txt', 'nested/b.txt']);

@@ -92,7 +92,12 @@ describe('buildManifest', () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'hello');
 
     const precomputed = new Map([['a.txt', 'deadbeef']]);
-    const manifest = await buildManifest(SNAPSHOT, meta(), ['a.txt'], precomputed);
+    const manifest = await buildManifest(
+      SNAPSHOT,
+      meta(),
+      [{ path: 'a.txt', size: 5 }],
+      precomputed,
+    );
 
     expect(manifest.files).toEqual([{ path: 'a.txt', size: 5, sha256: 'deadbeef' }]);
   });
@@ -101,7 +106,11 @@ describe('buildManifest', () => {
     await fs.writeFile(path.join(SNAPSHOT, 'b.txt'), 'b');
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
 
-    const manifest = await buildManifest(SNAPSHOT, meta(), ['b.txt', 'a.txt', 'a.txt']);
+    const manifest = await buildManifest(SNAPSHOT, meta(), [
+      { path: 'b.txt', size: 1 },
+      { path: 'a.txt', size: 1 },
+      { path: 'a.txt', size: 1 },
+    ]);
 
     expect(manifest.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt']);
   });

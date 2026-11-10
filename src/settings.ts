@@ -113,7 +113,8 @@ export function buildSettings(): Record<string, SettingItem> {
     [SETTING_KEYS.lastBackupResult]: {
       value: '',
       type: SettingItemType.String,
-      public: true,
+      // Shown by Tools > Show last backup result, not as an editable field.
+      public: false,
       section: SETTING_SECTION_NAME,
       label: 'Last backup result',
       description: 'Summary of the most recent backup run (start/finish/duration/changes).',

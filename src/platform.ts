@@ -155,25 +155,19 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
 /**
  * Refresh a held lock so a long-running backup is never mistaken for an
  * abandoned one. The lock's mtime is what `acquireLock` uses to judge
- * staleness, so writing the current timestamp is enough to renew it.
+ * staleness, so bumping it is enough to renew it.
  *
- * The file is opened without `O_CREAT`: a lock that has been released or
- * stolen in the meantime must not be resurrected by the heartbeat.
+ * `utimes` never creates the file: a lock that has been released or stolen in
+ * the meantime must not be resurrected by the heartbeat.
  */
 export async function touchLock(lockPath: string): Promise<void> {
-  let handle;
+  const now = new Date();
   try {
-    handle = await fs.open(lockPath, 'r+');
+    // Bumps the mtime only; unlike opening the file, it can never create it.
+    await fs.utimes(lockPath, now, now);
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return;
     throw error;
-  }
-
-  try {
-    await handle.truncate(0);
-    await handle.write(new Date().toISOString(), 0, 'utf8');
-  } finally {
-    await handle.close();
   }
 }
 

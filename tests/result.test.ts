@@ -4,6 +4,7 @@ import { logger } from '../src/logger';
 import {
   computeChanges,
   formatLastBackupResult,
+  formatSeconds,
   persistResult,
   RECORDED_LIST_LIMIT,
   recordChanges,
@@ -228,5 +229,13 @@ describe('computeChanges', () => {
   it('counts a path with an unknown hash as unchanged', () => {
     const changes = computeChanges(manifest([['a.md', 'h']]), ['a.md'], new Map());
     expect(changes).toMatchObject({ modified: [], unchanged: 1 });
+  });
+});
+
+describe('formatSeconds', () => {
+  it('shows one decimal of seconds', () => {
+    expect(formatSeconds(0)).toBe('0.0s');
+    expect(formatSeconds(1234)).toBe('1.2s');
+    expect(formatSeconds(61_060)).toBe('61.1s');
   });
 });

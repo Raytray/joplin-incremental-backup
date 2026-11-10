@@ -1,7 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
 import {
-  collectFilesRecursive,
   errorCode,
   hashFile,
   isHardlinkUnsupportedError,
@@ -168,10 +167,10 @@ export async function dedup(
   activeDir: string,
   previousSnapshotDir: string | null,
   previousManifest: Manifest | null,
-  activeFiles?: readonly string[],
+  activeFiles: readonly string[],
   options: DedupOptions = {},
 ): Promise<DedupResult> {
-  const files = activeFiles ? [...activeFiles] : await collectFilesRecursive(activeDir);
+  const files = [...activeFiles];
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const sizes = new Map<string, number>();

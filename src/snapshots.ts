@@ -35,8 +35,8 @@ export function configuredBackupRoot(
   return resolveBackupRoot(requireBackupPath(settings), options.profileName);
 }
 
-export function activeDirPath(backupRoot: string, runName?: string): string {
-  return path.join(backupRoot, runName ?? createStagingDirName());
+export function activeDirPath(backupRoot: string): string {
+  return path.join(backupRoot, createStagingDirName());
 }
 
 /**

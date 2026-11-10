@@ -2,11 +2,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { Dirent } from 'fs';
 import { errorCode, safeRmDir } from './platform';
+import { MIN_RETENTION } from './settings';
 
 /** `YYYYMMDDTHHMMSS` with an optional `-N` suffix for same-second runs. */
 export const SNAPSHOT_DIR_PATTERN = /^\d{8}T\d{6}(-\d+)?$/;
-
-const MIN_RETENTION = 1;
 
 /**
  * A verification in progress keeps its snapshot from being pruned by leaving

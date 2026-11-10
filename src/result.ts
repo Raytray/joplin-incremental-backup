@@ -78,6 +78,11 @@ export type CompletedRecord = RecordTimes & {
   message: string;
 };
 
+/** A run's duration as shown to the user, e.g. "1.2s". */
+export function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 /** The run record stored in the `lastBackupResultJson` setting. */
 export type BackupRecord = FailedRecord | CompletedRecord;
 
@@ -170,7 +175,7 @@ export function formatLastBackupResult(summary: string, json: string): string {
   }
 
   if (typeof parsed.durationMs === 'number') {
-    message += `\n\nDuration: ${(parsed.durationMs / 1000).toFixed(1)}s`;
+    message += `\n\nDuration: ${formatSeconds(parsed.durationMs)}`;
   }
 
   const warnings = stringList(parsed.warnings);

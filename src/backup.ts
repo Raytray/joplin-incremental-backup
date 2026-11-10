@@ -36,6 +36,7 @@ import { ToastType } from 'api/types';
 import {
   computeChanges,
   describeWarnings,
+  formatSeconds,
   persistResult,
   recordChanges,
   recordWarnings,
@@ -113,8 +114,6 @@ export interface BackupResult {
   message: string;
   /** Wall-clock duration of the run, in milliseconds. */
   durationMs?: number;
-  /** Human-readable duration, e.g. "1.2s". */
-  duration?: string;
   /** Semantic change summary relative to the previous snapshot. */
   changes?: BackupChanges;
   /** Whether the export was staged on this computer rather than on the backup drive. */
@@ -402,7 +401,7 @@ async function recordFailure(
   notify: boolean,
 ): Promise<void> {
   const durationMs = Date.now() - startTime;
-  const duration = `${(durationMs / 1000).toFixed(1)}s`;
+  const duration = formatSeconds(durationMs);
   const message = error instanceof Error ? error.message : String(error);
   logger.error('Backup failed.', error);
   if (notify) {
@@ -530,7 +529,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       const nowIso = (options.now ?? new Date()).toISOString();
       await setLastBackup(nowIso);
       const durationMs = Date.now() - startTime;
-      const duration = `${(durationMs / 1000).toFixed(1)}s`;
+      const duration = formatSeconds(durationMs);
       const changes: BackupChanges = {
         added: [],
         modified: [],
@@ -540,7 +539,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       const result: BackupResult = {
         status: 'skipped',
         durationMs,
-        duration,
         changes,
         message: 'No changes detected; backup skipped.',
       };
@@ -714,16 +712,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const manifest = await buildManifest(activeDir, meta, manifestEntries, dedupResult.hashes);
     await writeManifest(activeDir, manifest);
 
-    await safeRmDir(snapshotDir);
+    // resolveUniqueSnapshotName chose a name that doesn't exist yet.
     await fs.rename(activeDir, snapshotDir);
     await atomicWriteFile(path.join(backupRoot, LATEST_FILENAME), snapshotName);
 
-    await pruneSnapshots(
-      backupRoot,
-      Math.max(1, settings.backupRetention),
-      snapshotName,
-      context.staleLockMs,
-    );
+    await pruneSnapshots(backupRoot, settings.backupRetention, snapshotName, context.staleLockMs);
 
     // Persist the committed snapshot immediately so settings never lag behind
     // what is on disk, even if later result/message building throws.
@@ -751,8 +744,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const warningMessages = warnings.map((w) => w.message);
 
     const durationMs = Date.now() - startTime;
-    const elapsed = (durationMs / 1000).toFixed(1);
-    const duration = `${elapsed}s`;
+    const duration = formatSeconds(durationMs);
     const result: BackupResult = {
       status: 'success',
       snapshotName,
@@ -765,7 +757,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       warnings: warningMessages,
       stagedLocally: localDir !== null,
       durationMs,
-      duration,
       changes,
       message:
         `Backup complete: ${manifest.fileCount} files in ${snapshotName} in ${duration}.` +
@@ -795,7 +786,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     // Only announce completion once everything has been persisted.
     logger.info(
-      `Backup complete in ${elapsed}s: ${manifest.fileCount} files, ` +
+      `Backup complete in ${duration}: ${manifest.fileCount} files, ` +
         `${dedupResult.hardlinked} hardlinked, ${dedupResult.copied} copied, ${dedupResult.unchanged} unchanged` +
         (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
         (warnings.length ? `, ${warnings.length} warning(s)` : ''),

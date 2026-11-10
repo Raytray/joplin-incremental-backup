@@ -21,12 +21,12 @@ import {
   runBackup,
 } from '../src/backup';
 import {
+  collectVaultInventory,
   digestPairs,
   fingerprintsEqual,
   getAllFolderIds,
-  getChangeFingerprint,
 } from '../src/inventory';
-import { describeWarnings } from '../src/result';
+import { describeWarnings, formatSeconds } from '../src/result';
 import {
   ACTIVE_DIR_PREFIX,
   createStagingDirName,
@@ -44,6 +44,10 @@ import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { pruneSnapshots, VERIFY_LEASE_PREFIX } from '../src/retention';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
+
+/** The fingerprint part of the inventory. */
+const getChangeFingerprint = async (options?: Parameters<typeof collectVaultInventory>[0]) =>
+  (await collectVaultInventory(options)).fingerprint;
 import { MISSING_BACKUP_PATH_MESSAGE, SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
@@ -1597,7 +1601,9 @@ describe('runBackup — result timestamps', () => {
 
     expect(second.status).toBe('skipped');
     expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(injectedIso);
-    expect(lastResult()).toBe(`Skipped (no changes) at ${injectedIso} — ${second.duration}`);
+    expect(lastResult()).toBe(
+      `Skipped (no changes) at ${injectedIso} — ${formatSeconds(second.durationMs!)}`,
+    );
     expect(lastRecord().finishedAt).toBe(injectedIso);
   });
 
