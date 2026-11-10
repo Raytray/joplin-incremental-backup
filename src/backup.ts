@@ -35,10 +35,9 @@ import {
   requireBackupPath,
   setLastBackup,
   setLastSnapshot,
-  setLastBackupResult,
-  setLastBackupResultJson,
 } from './settings';
 import { ToastType } from 'api/types';
+import { persistResult, recordChanges, recordWarnings } from './result';
 import type { Settings } from './settings';
 
 export const LOCK_FILENAME = '.backup.lock';
@@ -837,7 +836,7 @@ export async function prepareBackupRoot(
 
 /**
  * Log, toast and persist a failed run so "Show last backup result" reflects
- * it. Persistence errors are swallowed: they must never mask the original.
+ * it.
  */
 async function recordFailure(
   startTime: number,
@@ -859,19 +858,14 @@ async function recordFailure(
       .catch(() => undefined);
   }
   const finishedIso = finishedAt.toISOString();
-  try {
-    const record = JSON.stringify({
-      status: 'failed',
-      startedAt: new Date(startTime).toISOString(),
-      finishedAt: finishedIso,
-      durationMs,
-      error: message,
-    });
-    await setLastBackupResult(`${finishedIso} — failed — ${duration} — ${message}`);
-    await setLastBackupResultJson(record);
-  } catch {
-    // Persistence must never mask the original error.
-  }
+  // persistResult never throws, so it cannot mask the original error.
+  await persistResult(`${finishedIso} — failed — ${duration} — ${message}`, {
+    status: 'failed',
+    startedAt: new Date(startTime).toISOString(),
+    finishedAt: finishedIso,
+    durationMs,
+    error: message,
+  });
 }
 
 /**
@@ -996,17 +990,15 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       void joplin.views.dialogs
         .showToast({ message: `Backup skipped (no changes) in ${duration}.`, type: ToastType.Info })
         .catch(() => undefined);
-      const record = JSON.stringify({
+      await persistResult(`Skipped (no changes) at ${nowIso} — ${duration}`, {
         status: 'skipped',
         startedAt: new Date(startTime).toISOString(),
         finishedAt: nowIso,
         durationMs,
-        changes,
-        warnings: [],
+        changes: recordChanges(changes),
+        ...recordWarnings([]),
         message: result.message,
       });
-      await setLastBackupResult(`Skipped (no changes) at ${nowIso} — ${duration}`);
-      await setLastBackupResultJson(record);
       logger.info('No changes detected; backup skipped.');
       return result;
     }
@@ -1236,22 +1228,23 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         describeWarnings(warnings),
     };
 
-    const record = JSON.stringify({
-      status: 'success',
-      startedAt: new Date(startTime).toISOString(),
-      finishedAt: finishedIso,
-      durationMs,
-      snapshotName,
-      fileCount: manifest.fileCount,
-      changes,
-      warnings: warningMessages,
-      message: result.message,
-    });
-    await setLastBackupResult(
+    await persistResult(
       `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
         `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
+      {
+        status: 'success',
+        startedAt: new Date(startTime).toISOString(),
+        finishedAt: finishedIso,
+        durationMs,
+        snapshotName,
+        fileCount: manifest.fileCount,
+        // Counts plus the first paths: the full lists of a first backup would
+        // put every path in the vault into Joplin's settings database.
+        changes: recordChanges(changes),
+        ...recordWarnings(warningMessages),
+        message: result.message,
+      },
     );
-    await setLastBackupResultJson(record);
 
     // Only announce completion once everything has been persisted.
     logger.info(

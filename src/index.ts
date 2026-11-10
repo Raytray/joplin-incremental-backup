@@ -5,6 +5,7 @@ import { logger } from './logger';
 import { runBackup, verifyBackup, recoverBackupDirs } from './backup';
 import { registerSettings, getSettings } from './settings';
 import { initScheduler } from './scheduler';
+import { formatLastBackupResult } from './result';
 
 export const CREATE_COMMAND = 'CreateIncrementalBackup';
 export const VERIFY_COMMAND = 'VerifyIncrementalBackup';
@@ -48,37 +49,10 @@ export async function handleVerifyBackup(): Promise<void> {
 export async function handleShowLastBackupResult(): Promise<void> {
   try {
     const settings = await getSettings();
-    const json = settings.lastBackupResultJson;
-    let message = settings.lastBackupResult || 'No backup run has been recorded yet.';
-    if (json) {
-      try {
-        const parsed = JSON.parse(json) as Record<string, unknown>;
-        const changes = parsed.changes as
-          | { added?: string[]; modified?: string[]; deleted?: string[]; unchanged?: number }
-          | undefined;
-        if (changes) {
-          message += `\n\nChanges: +${changes.added?.length ?? 0} ~${changes.modified?.length ?? 0} -${changes.deleted?.length ?? 0} (${changes.unchanged ?? 0} unchanged)`;
-          if ((changes.added?.length ?? 0) > 0) {
-            message += `\nAdded:\n${(changes.added ?? []).slice(0, 20).join('\n')}`;
-          }
-          if ((changes.modified?.length ?? 0) > 0) {
-            message += `\nModified:\n${(changes.modified ?? []).slice(0, 20).join('\n')}`;
-          }
-          if ((changes.deleted?.length ?? 0) > 0) {
-            message += `\nDeleted:\n${(changes.deleted ?? []).slice(0, 20).join('\n')}`;
-          }
-        }
-        if (typeof parsed.durationMs === 'number') {
-          message += `\n\nDuration: ${(parsed.durationMs / 1000).toFixed(1)}s`;
-        }
-        if (Array.isArray(parsed.warnings) && parsed.warnings.length > 0) {
-          message += `\n\nWarnings:\n${(parsed.warnings as string[]).join('\n')}`;
-        }
-      } catch {
-        // Fall back to the summary string.
-      }
-    }
-
+    const message = formatLastBackupResult(
+      settings.lastBackupResult ?? '',
+      settings.lastBackupResultJson ?? '',
+    );
     await joplin.views.dialogs.showMessageBox(message);
   } catch (error) {
     logger.error('Could not show last backup result.', error);

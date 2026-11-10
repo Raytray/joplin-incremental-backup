@@ -1019,6 +1019,46 @@ describe('describeWarnings', () => {
 });
 
 describe('runBackup — success bookkeeping', () => {
+  it('still reports success when the result cannot be recorded', async () => {
+    const realSetValue = joplin.settings.setValue.bind(joplin.settings);
+    const setValue = vi
+      .spyOn(joplin.settings, 'setValue')
+      .mockImplementation(async (key: string, value: unknown) => {
+        if (key === SETTING_KEYS.lastBackupResultJson && value !== '') {
+          throw new Error('settings DB error');
+        }
+        return realSetValue(key, value);
+      });
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await run();
+      expect(result.status).toBe('success');
+    } finally {
+      setValue.mockRestore();
+    }
+
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/— success —/);
+    expect(mockState.values[SETTING_KEYS.lastSnapshot]).toBeTruthy();
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(false);
+  });
+
+  it('records counts and only the first changed paths, keeping the full lists in the result', async () => {
+    const files = Array.from({ length: 30 }, (_, i) => ({
+      path: `n${i}.md`,
+      content: `note ${i}`,
+    }));
+    stubExport(files);
+
+    const result = await run();
+
+    expect(result.changes?.added).toHaveLength(30);
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record.changes.addedCount).toBe(30);
+    expect(record.changes.added).toHaveLength(20);
+    expect(record.changes.added).toEqual(result.changes?.added.slice(0, 20));
+    expect(record).toMatchObject({ status: 'success', warningCount: 0, warnings: [] });
+  });
+
   it('reports the hardlink fallback as a warning without calling the snapshot incomplete', async () => {
     await run();
 

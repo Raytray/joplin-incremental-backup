@@ -7,7 +7,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { expect } from 'vitest';
-import type { BackupChanges } from '../src/backup';
+import type { BackupRecord, CompletedRecord, FailedRecord } from '../src/result';
 import type { Manifest } from '../src/manifest';
 import { JoplinInstance, sleep, waitFor } from './joplin';
 
@@ -21,15 +21,13 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 export const ACTIVE_DIR_PREFIX = '_joplin_active_';
 export const LOCK_FILENAME = '.backup.lock';
 
-export interface RunRecord {
-  status?: string;
-  snapshotName?: string;
-  changes?: BackupChanges;
-  warnings?: string[];
-  message?: string;
-  /** Set on failed runs instead of `message`. */
-  error?: string;
-}
+/**
+ * The persisted run record as the tests read it: any field of either record
+ * shape may be missing (e.g. `{}` when nothing was recorded yet).
+ */
+export type RunRecord = { status?: BackupRecord['status'] } & Partial<
+  Omit<CompletedRecord, 'status'> & Omit<FailedRecord, 'status'>
+>;
 
 export function sha256(data: Buffer): string {
   return createHash('sha256').update(data).digest('hex');

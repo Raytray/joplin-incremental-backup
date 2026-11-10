@@ -310,9 +310,7 @@ describe.each(MODES)('incremental backup in a real Joplin, $name', (mode) => {
     snapshots.push(snapshotName!);
 
     // The only change is one new file, the note↔tag link.
-    expect(changes?.modified).toEqual([]);
-    expect(changes?.deleted).toEqual([]);
-    expect(changes?.added).toHaveLength(1);
+    expect(changes).toMatchObject({ addedCount: 1, modifiedCount: 0, deletedCount: 0 });
     const link = await fs.readFile(path.join(backupDir, snapshotName!, changes!.added[0]), 'utf8');
     expect(link).toContain(`note_id: ${ids.editedNote}`);
     expect(link).toContain(`tag_id: ${ids.tag}`);
