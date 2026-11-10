@@ -13,7 +13,7 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 - **Content-addressed matching** — files are matched by SHA-256 hash, so even renamed or moved notes don't consume extra space.
 - **Retention pruning** — keeps a configurable number of snapshots (default: 5) and automatically deletes the oldest ones. Deleting an old snapshot never damages newer ones, because hardlinked files are only removed when no snapshot references them.
 - **Skip unchanged backups** — if nothing has changed since the last snapshot (notes, attachments, notebooks, tags, or which notes carry which tags), the backup is skipped entirely (can be disabled).
-- **Integrity verification** — every snapshot includes a `manifest.json` with the size and SHA-256 hash of every file. A verify command re-checks the whole snapshot and reports any missing or corrupted files.
+- **Integrity verification** — every snapshot includes a `manifest.json` with the size and SHA-256 hash of every file. A verify command re-checks the whole snapshot and reports any missing or corrupted files, and warns about files the manifest doesn't list. While a verification runs, backups can still run, but retention pruning skips the snapshot being verified (it is pruned by a later run instead). A verification started while a backup is running says so and asks to be run again once it finishes.
 - **Crash-safe** — each backup run stages its files in a unique temporary directory (e.g. `_joplin_active_20261021T090000_12345_abcdef`) that is atomically renamed into place when complete. An exclusive lock prevents overlapping runs; the lock's mtime is refreshed periodically so a long export is never mistaken for an abandoned one. Stale locks are recovered atomically (rename-steal), and leftover staging data is cleaned up on startup unless another backup holds a fresh lock.
 - **Optional local staging** — with **Stage the export on this computer** on (under Advanced), the export goes to a temporary folder in the Joplin profile instead of the backup drive. Unchanged files are then hardlinked from the previous snapshot and only new or changed files are copied to the drive, so a daily backup of a large vault writes only what changed. See [Local staging](#local-staging).
 - **Disk-space pre-flight** — checks available space before starting a backup and aborts the run if the backup drive is below the minimum free-space threshold, so a full disk can't produce a truncated snapshot. (If free space can't be measured on a platform, the backup proceeds with a warning.)
@@ -47,7 +47,8 @@ Each snapshot is a complete, self-contained copy of your data. Consecutive snaps
 ├── _joplin_active_20261021T090000_12345_abcdef/  ← staging dir (only while running)
 ├── latest.txt                    ← name of the newest snapshot
 ├── .joplin-incremental-backup    ← marker: this is a backup directory
-└── .backup.lock                  ← present only while a backup is running
+├── .backup.lock                  ← present only while a backup is running
+└── .verifying.<snapshot>.<id>    ← present only while a snapshot is being verified
 ```
 
 Notes, notebooks, tags and note-tags are each written as a single `<id>.md` file directly in the snapshot root (this mirrors Joplin's Raw export exactly); only attachments live under `resources/`.

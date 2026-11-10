@@ -10,6 +10,7 @@ import {
   assertDiskSpace,
   atomicWriteFile,
   collectEntries,
+  collectFilesRecursive,
   computeFileSha256,
   DEFAULT_MIN_FREE_BYTES,
   ensureBackupRoot,
@@ -21,11 +22,17 @@ import {
   toManifestKey,
   touchLock,
 } from './platform';
-import { buildManifest, FINGERPRINT_DIGEST_KEYS, readManifest, writeManifest } from './manifest';
+import {
+  buildManifest,
+  FINGERPRINT_DIGEST_KEYS,
+  MANIFEST_FILENAME,
+  readManifest,
+  writeManifest,
+} from './manifest';
 import type { ChangeFingerprint, DeduplicationMode, Manifest, ManifestMeta } from './manifest';
 import { dedup, getDeduplicationMode, stageFromLocal } from './dedup';
 import type { DedupResult } from './dedup';
-import { listSnapshots, pruneSnapshots } from './retention';
+import { createVerifyLease, listSnapshots, pruneSnapshots } from './retention';
 import {
   addInitializedBackupRoot,
   getLastBackup,
@@ -264,8 +271,18 @@ export interface VerifyResult {
   total: number;
   matched: number;
   mismatches: string[];
+  /**
+   * Files in the snapshot that its manifest does not list (besides the
+   * manifest itself). Reported as a warning: they don't make it fail.
+   */
+  extraFiles: string[];
+  /** A backup was running, so nothing was verified. */
+  busy?: boolean;
   message: string;
 }
+
+/** How many extra file paths the verify message lists by name. */
+const EXTRA_FILES_SHOWN = 10;
 
 interface ResolvedContext {
   settings: Settings;
@@ -665,11 +682,15 @@ async function resolveJoplinVersion(): Promise<string> {
  * stale threshold to export, and a lock that is still being renewed must never
  * be mistaken for an abandoned one.
  */
-function startLockHeartbeat(lockPath: string, staleLockMs: number): { stop: () => void } {
+function startLockHeartbeat(
+  lockPath: string,
+  staleLockMs: number,
+  label = 'backup lock',
+): { stop: () => void } {
   const intervalMs = Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(staleLockMs / 3));
   const timer = setInterval(() => {
     void touchLock(lockPath).catch((error) => {
-      logger.warn('Failed to refresh the backup lock.', error);
+      logger.warn(`Failed to refresh the ${label}.`, error);
     });
   }, intervalMs);
 
@@ -1176,7 +1197,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     await fs.rename(activeDir, snapshotDir);
     await atomicWriteFile(path.join(backupRoot, LATEST_FILENAME), snapshotName);
 
-    await pruneSnapshots(backupRoot, Math.max(1, settings.backupRetention), snapshotName);
+    await pruneSnapshots(
+      backupRoot,
+      Math.max(1, settings.backupRetention),
+      snapshotName,
+      context.staleLockMs,
+    );
 
     // Persist the committed snapshot immediately so settings never lag behind
     // what is on disk, even if later result/message building throws.
@@ -1293,37 +1319,105 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 // Verification
 // ---------------------------------------------------------------------------
 
+/** Errors that mean the backup drive can't be written to at all. */
+const READ_ONLY_CODES = new Set(['EROFS', 'EACCES', 'EPERM']);
+
+function emptyVerifyResult(
+  snapshotName: string | null,
+  snapshotDir: string | null,
+  message: string,
+  extra: Partial<VerifyResult> = {},
+): VerifyResult {
+  return {
+    ok: false,
+    snapshotName,
+    snapshotDir,
+    total: 0,
+    matched: 0,
+    mismatches: [],
+    extraFiles: [],
+    message,
+    ...extra,
+  };
+}
+
+/**
+ * Verify the latest snapshot against its manifest.
+ *
+ * The backup lock is only held while choosing the snapshot and leasing it:
+ * hashing a whole snapshot can take minutes, and holding the lock that long
+ * would make scheduled backups fail. Prunes skip a leased snapshot, and they
+ * only run under the lock, so none can start between choosing and leasing.
+ */
 export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyResult> {
   const settings = await getSettings();
   const backupRoot = configuredBackupRoot(settings, options);
   const computeHash = options.computeHash ?? computeFileSha256;
+  const staleLockMs = options.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
+  const lockPath = path.join(backupRoot, LOCK_FILENAME);
+  const resolve = () => resolveLastSnapshot(backupRoot, settings.lastSnapshot || undefined);
 
-  const snapshotName = await resolveLastSnapshot(backupRoot, settings.lastSnapshot || undefined);
-
-  if (!snapshotName) {
-    return {
-      ok: false,
-      snapshotName: null,
-      snapshotDir: null,
-      total: 0,
-      matched: 0,
-      mismatches: [],
-      message: 'No snapshot found to verify.',
-    };
+  let snapshotName: string | null;
+  let leasePath: string | null = null;
+  try {
+    await acquireLock(lockPath, staleLockMs);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === 'EEXIST') {
+      return emptyVerifyResult(
+        null,
+        null,
+        'A backup is in progress. Verify again once it has finished.',
+        { busy: true },
+      );
+    }
+    // No backup directory yet: nothing to verify (reported below).
+    if (code === 'ENOENT') return emptyVerifyResult(null, null, 'No snapshot found to verify.');
+    // A read-only drive can't be backed up to, so nothing can prune it.
+    if (!code || !READ_ONLY_CODES.has(code)) throw error;
+    logger.warn(`Verifying without a lease: the backup drive is not writable (${code}).`);
+    snapshotName = await resolve();
+    return snapshotName
+      ? verifySnapshot(backupRoot, snapshotName, computeHash)
+      : emptyVerifyResult(null, null, 'No snapshot found to verify.');
   }
 
+  try {
+    snapshotName = await resolve();
+    if (snapshotName) leasePath = await createVerifyLease(backupRoot, snapshotName);
+  } finally {
+    await releaseLock(lockPath).catch((error) =>
+      logger.warn('Failed to release backup lock.', error),
+    );
+  }
+
+  if (!snapshotName) return emptyVerifyResult(null, null, 'No snapshot found to verify.');
+
+  const heartbeat = startLockHeartbeat(leasePath!, staleLockMs, 'verify lease');
+  try {
+    return await verifySnapshot(backupRoot, snapshotName, computeHash);
+  } finally {
+    heartbeat.stop();
+    await fs
+      .rm(leasePath!, { force: true })
+      .catch((error) => logger.warn('Failed to remove the verify lease.', error));
+  }
+}
+
+/** Check every file of one snapshot against its manifest, and look for unlisted files. */
+async function verifySnapshot(
+  backupRoot: string,
+  snapshotName: string,
+  computeHash: NonNullable<BackupOptions['computeHash']>,
+): Promise<VerifyResult> {
   const snapshotDir = snapshotDirPath(backupRoot, snapshotName);
   const manifest = await readManifest(snapshotDir);
   if (!manifest) {
-    return {
-      ok: false,
+    return emptyVerifyResult(
       snapshotName,
       snapshotDir,
-      total: 0,
-      matched: 0,
-      mismatches: [],
-      message: `No valid manifest found in ${snapshotName}.`,
-    };
+      `No valid manifest found in ${snapshotName}.`,
+    );
   }
 
   const results = await mapWithConcurrency(manifest.files, VERIFY_CONCURRENCY, async (file) => {
@@ -1348,19 +1442,27 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   const mismatches = results.filter((result) => !result.ok).map((result) => result.path);
   const total = manifest.files.length;
   const matched = total - mismatches.length;
-  const ok = mismatches.length === 0 && matched === total && total > 0;
 
-  return {
-    ok,
-    snapshotName,
-    snapshotDir,
-    total,
-    matched,
-    mismatches,
-    message: ok
-      ? `Verified ${total} files in ${snapshotName}.`
-      : `Verification failed in ${snapshotName}: ${mismatches.length} of ${total} files mismatch.`,
-  };
+  const listed = new Set(manifest.files.map((file) => file.path));
+  listed.add(MANIFEST_FILENAME);
+  const extraFiles = (await collectFilesRecursive(snapshotDir))
+    .filter((filePath) => !listed.has(filePath))
+    .sort();
+
+  const ok = mismatches.length === 0 && total > 0;
+  let message = ok
+    ? `Verified ${total} files in ${snapshotName}.`
+    : `Verification failed in ${snapshotName}: ${mismatches.length} of ${total} files mismatch.`;
+  if (extraFiles.length > 0) {
+    const shown = extraFiles.slice(0, EXTRA_FILES_SHOWN);
+    const more = extraFiles.length - shown.length;
+    message +=
+      `\n\nWarning: ${extraFiles.length} file(s) in the snapshot are not listed in its ` +
+      `manifest:\n${shown.join('\n')}` +
+      (more > 0 ? `\n… and ${more} more` : '');
+  }
+
+  return { ok, snapshotName, snapshotDir, total, matched, mismatches, extraFiles, message };
 }
 
 /**
