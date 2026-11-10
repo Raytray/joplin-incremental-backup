@@ -37,6 +37,7 @@ import {
 } from '../src/backup';
 import { snapshotDirPath } from '../src/backup';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
+import { pruneSnapshots, VERIFY_LEASE_PREFIX } from '../src/retention';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
 import { MISSING_BACKUP_PATH_MESSAGE, SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
@@ -1274,35 +1275,94 @@ describe('verifyBackup', () => {
     expect(result.message).not.toMatch(/Warning/);
   });
 
-  it('reports an interrupted verification, not a failure, when a backup prunes the snapshot meanwhile', async () => {
+  it('keeps a backup from pruning the snapshot while it is being verified', async () => {
     const first = await run();
     const root = path.join(BACKUP_ROOT, PROFILE);
-    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+    let pruned: string[] | undefined;
+    let leases: string[] = [];
 
     // While the file is being hashed, a backup commits a newer snapshot and
-    // prunes this one (retention 1).
+    // prunes at retention 1.
     const result = await verifyBackup({
       backupRoot: root,
-      computeHash: async () => {
-        await fs.writeFile(path.join(root, LATEST_FILENAME), '20991231T000000');
-        await fs.rm(snapshotDir, { recursive: true, force: true });
-        return 'gone';
+      computeHash: async (filePath) => {
+        leases = (await fs.readdir(root)).filter((name) => name.startsWith(VERIFY_LEASE_PREFIX));
+        await fs.mkdir(path.join(root, '20991231T000000'));
+        pruned = await pruneSnapshots(root, 1, '20991231T000000');
+        return createHash('sha256')
+          .update(await fs.readFile(filePath))
+          .digest('hex');
       },
     });
 
-    expect(result).toMatchObject({ ok: false, interrupted: true, extraFiles: [] });
-    expect(result.message).toMatch(/A backup ran while .* was being verified/);
-    expect(result.message).not.toMatch(/Verification failed/);
+    expect(leases).toHaveLength(1);
+    expect(pruned).toEqual([]);
+    expect(result).toMatchObject({ ok: true, snapshotName: first.snapshotName });
+    // The lease is gone afterwards, so the next prune removes the snapshot.
+    expect((await fs.readdir(root)).some((name) => name.startsWith(VERIFY_LEASE_PREFIX))).toBe(
+      false,
+    );
+    await expect(pruneSnapshots(root, 1, '20991231T000000')).resolves.toEqual([first.snapshotName]);
   });
 
-  it('still fails for a corrupted file when no backup ran meanwhile', async () => {
+  it('releases the backup lock before hashing', async () => {
+    await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    let lockHeld: boolean | undefined;
+
+    await verifyBackup({
+      backupRoot: root,
+      computeHash: async () => {
+        lockHeld = (await fs.readdir(root)).includes(LOCK_FILENAME);
+        return '';
+      },
+    });
+
+    expect(lockHeld).toBe(false);
+    expect(await fs.readdir(root)).not.toContain(LOCK_FILENAME);
+  });
+
+  it('says a backup is in progress when the lock is held, and leases nothing', async () => {
+    await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    await fs.writeFile(path.join(root, LOCK_FILENAME), new Date().toISOString());
+
+    const result = await verifyBackup({ backupRoot: root });
+
+    expect(result).toMatchObject({ ok: false, busy: true });
+    expect(result.message).toMatch(/A backup is in progress/);
+    expect((await fs.readdir(root)).some((name) => name.startsWith(VERIFY_LEASE_PREFIX))).toBe(
+      false,
+    );
+  });
+
+  it('still verifies a read-only backup drive, without a lease', async () => {
+    await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const realOpen = fs.open.bind(fs);
+    const open = vi.spyOn(fs, 'open').mockImplementation((async (
+      file: Parameters<typeof fs.open>[0],
+      flags?: Parameters<typeof fs.open>[1],
+    ) => {
+      if (flags === 'wx') throw Object.assign(new Error('read-only'), { code: 'EROFS' });
+      return realOpen(file, flags);
+    }) as typeof fs.open);
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await verifyBackup({ backupRoot: root });
+      expect(result.ok).toBe(true);
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it('still fails for a corrupted file', async () => {
     const first = await run();
     const root = path.join(BACKUP_ROOT, PROFILE);
     await fs.writeFile(path.join(snapshotDirPath(root, first.snapshotName!), 'n1.md'), 'tampered');
 
     const result = await verifyBackup({ backupRoot: root });
 
-    expect(result.interrupted).toBeUndefined();
     expect(result.message).toMatch(/Verification failed/);
   });
 

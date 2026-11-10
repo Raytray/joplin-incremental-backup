@@ -351,8 +351,21 @@ export async function collectEntries(
   return results;
 }
 
-/** Recursively collect file paths relative to `baseDir`, using `/` separators. */
+/**
+ * Recursively collect file paths relative to `baseDir`, using `/` separators.
+ * Unlike `collectEntries` it doesn't `stat` each file.
+ */
 export async function collectFilesRecursive(dir: string, baseDir: string = dir): Promise<string[]> {
-  const entries = await collectEntries(dir, baseDir);
-  return entries.map((e) => e.path);
+  const results: string[] = [];
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(fullPath);
+      else if (entry.isFile()) {
+        results.push(path.relative(baseDir, fullPath).split(path.sep).join('/'));
+      }
+    }
+  };
+  await walk(dir);
+  return results;
 }

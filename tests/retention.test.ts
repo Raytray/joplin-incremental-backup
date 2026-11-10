@@ -8,7 +8,14 @@ vi.mock('fs/promises', async () => {
 import fs from 'fs/promises';
 import path from 'path';
 import { vol } from 'memfs';
-import { listSnapshots, pruneSnapshots, SNAPSHOT_DIR_PATTERN } from '../src/retention';
+import {
+  createVerifyLease,
+  leasedSnapshots,
+  listSnapshots,
+  pruneSnapshots,
+  SNAPSHOT_DIR_PATTERN,
+  VERIFY_LEASE_PREFIX,
+} from '../src/retention';
 
 const ROOT = '/backups';
 
@@ -119,5 +126,57 @@ describe('pruneSnapshots', () => {
     await expect(listSnapshots(ROOT)).resolves.toEqual([names[0], names[2]]);
 
     rmSpy.mockRestore();
+  });
+});
+
+describe('verify leases', () => {
+  /** Back-date a file's mtime by `ageMs`. */
+  async function age(filePath: string, ageMs: number): Promise<void> {
+    const then = new Date(Date.now() - ageMs);
+    await fs.utimes(filePath, then, then);
+  }
+
+  it('keeps a leased snapshot past the retention limit, and prunes the others', async () => {
+    const names = [snapshotName(0), snapshotName(1), snapshotName(2), snapshotName(3)];
+    await createSnapshots(names);
+    await createVerifyLease(ROOT, names[0]);
+
+    const removed = await pruneSnapshots(ROOT, 2, names[3]);
+
+    expect(removed).toEqual([names[1]]);
+    await expect(listSnapshots(ROOT)).resolves.toEqual([names[0], names[2], names[3]]);
+  });
+
+  it('does not delete a newer snapshot in place of a leased one', async () => {
+    const names = [snapshotName(0), snapshotName(1)];
+    await createSnapshots(names);
+    await createVerifyLease(ROOT, names[0]);
+
+    await expect(pruneSnapshots(ROOT, 1, names[1])).resolves.toEqual([]);
+    await expect(listSnapshots(ROOT)).resolves.toEqual(names);
+  });
+
+  it('ignores and removes a stale lease', async () => {
+    const names = [snapshotName(0), snapshotName(1)];
+    await createSnapshots(names);
+    const lease = await createVerifyLease(ROOT, names[0]);
+    await age(lease, 60_000);
+
+    await expect(pruneSnapshots(ROOT, 1, names[1], 30_000)).resolves.toEqual([names[0]]);
+    await expect(fs.stat(lease)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('gives each lease a unique name, and lists only valid snapshot names', async () => {
+    const a = await createVerifyLease(ROOT, snapshotName(0));
+    const b = await createVerifyLease(ROOT, snapshotName(0));
+    await fs.writeFile(path.join(ROOT, `${VERIFY_LEASE_PREFIX}not-a-snapshot.x`), '');
+
+    expect(a).not.toBe(b);
+    expect(path.basename(a).startsWith(`${VERIFY_LEASE_PREFIX}${snapshotName(0)}.`)).toBe(true);
+    await expect(leasedSnapshots(ROOT)).resolves.toEqual(new Set([snapshotName(0)]));
+  });
+
+  it('treats a missing backup root as having no leases', async () => {
+    await expect(leasedSnapshots('/nowhere')).resolves.toEqual(new Set());
   });
 });
