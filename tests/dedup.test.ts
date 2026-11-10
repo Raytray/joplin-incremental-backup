@@ -282,12 +282,13 @@ describe('dedup — failure handling', () => {
 
   it('uses the injected hasher', async () => {
     await writeFiles(ACTIVE, [{ path: 'a.txt', content: 'hello' }]);
-    const computeHash = vi.fn(async () => 'injected-hash');
+    const hashFile = vi.fn(async () => ({ sha256: 'injected-hash', size: 42 }));
 
-    const result = await dedup(ACTIVE, null, null, ['a.txt'], { computeHash });
+    const result = await dedup(ACTIVE, null, null, ['a.txt'], { hashFile });
 
-    expect(computeHash).toHaveBeenCalledTimes(1);
+    expect(hashFile).toHaveBeenCalledTimes(1);
     expect(result.hashes.get('a.txt')).toBe('injected-hash');
+    expect(result.sizes.get('a.txt')).toBe(42);
   });
 
   it('keeps case-only-different paths on distinct hash keys', async () => {
@@ -418,10 +419,10 @@ describe('dedup — no hardlink support', () => {
 
     // Hash the file with the missing source last, so the probe has already
     // settled "unsupported" by the time it is matched.
-    const computeHash = async (filePath: string) => {
+    const hashFile = async (filePath: string) => {
       const content = await fs.readFile(filePath);
       if (filePath.endsWith('c')) await new Promise((resolve) => setTimeout(resolve, 20));
-      return createHash('sha256').update(content).digest('hex');
+      return { sha256: createHash('sha256').update(content).digest('hex'), size: content.length };
     };
 
     const result = await dedup(
@@ -429,7 +430,7 @@ describe('dedup — no hardlink support', () => {
       PREVIOUS,
       manifest,
       files.map((f) => f.path),
-      { computeHash },
+      { hashFile },
     );
 
     expect(result).toMatchObject({ hardlinked: 0, copied: 2, unchanged: 1, failed: 0 });

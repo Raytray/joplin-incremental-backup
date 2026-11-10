@@ -320,14 +320,15 @@ export interface FileDigest {
 /**
  * SHA-256 and size of a file, without a `stat`: the size is the number of
  * bytes read. Reads 64 KB chunks, switching to 1 MB chunks once the file turns
- * out to be larger than that (or straight away when `sizeHint` says so).
+ * out to be at least that large (or straight away when `sizeHint` says so).
  */
 export async function hashFile(filePath: string, sizeHint?: number): Promise<FileDigest> {
   const hash = createHash('sha256');
   const handle = await fs.open(filePath, 'r');
   let position = 0;
   try {
-    let buffer = Buffer.alloc(
+    // Unzeroed buffers are safe: only the bytes read are ever hashed.
+    let buffer = Buffer.allocUnsafe(
       sizeHint !== undefined && sizeHint > HASH_CHUNK_THRESHOLD
         ? HASH_CHUNK_SIZE_LARGE
         : HASH_CHUNK_SIZE_SMALL,
@@ -337,9 +338,10 @@ export async function hashFile(filePath: string, sizeHint?: number): Promise<Fil
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
       position += bytesRead;
-      if (buffer.length < HASH_CHUNK_SIZE_LARGE && bytesRead === buffer.length) {
-        // A full small chunk: the file may be large, so read bigger chunks.
-        buffer = Buffer.alloc(HASH_CHUNK_SIZE_LARGE);
+      // Past the small-file threshold, read bigger chunks. This goes by the
+      // position, not by full reads, which network filesystems may not return.
+      if (buffer.length < HASH_CHUNK_SIZE_LARGE && position >= HASH_CHUNK_THRESHOLD) {
+        buffer = Buffer.allocUnsafe(HASH_CHUNK_SIZE_LARGE);
       }
     }
   } finally {
@@ -353,36 +355,9 @@ export async function computeFileSha256(filePath: string, sizeHint?: number): Pr
   return (await hashFile(filePath, sizeHint)).sha256;
 }
 
-/** One stat per file, in parallel, returning path and size. */
-export async function collectEntries(
-  dir: string,
-  baseDir: string = dir,
-): Promise<Array<{ path: string; size: number }>> {
-  const results: Array<{ path: string; size: number }> = [];
-
-  const walk = async (current: string): Promise<void> => {
-    const entries = await fs.readdir(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        await walk(fullPath);
-      } else if (entry.isFile()) {
-        const stat = await fs.stat(fullPath);
-        results.push({
-          path: path.relative(baseDir, fullPath).split(path.sep).join('/'),
-          size: stat.size,
-        });
-      }
-    }
-  };
-
-  await walk(dir);
-  return results;
-}
-
 /**
  * Recursively collect file paths relative to `baseDir`, using `/` separators.
- * Unlike `collectEntries` it doesn't `stat` each file.
+ * Doesn't `stat` each file.
  */
 export async function collectFilesRecursive(dir: string, baseDir: string = dir): Promise<string[]> {
   const results: string[] = [];

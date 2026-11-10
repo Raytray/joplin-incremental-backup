@@ -210,6 +210,41 @@ describe('hashFile', () => {
     await expect(hashFile(filePath, size)).resolves.toEqual({ sha256: sha256(content), size });
   });
 
+  it('moves to 1 MB reads past 64 KB even when reads come back short', async () => {
+    const filePath = path.join(ROOT, 'short-reads.bin');
+    const content = Buffer.alloc(300 * 1024, 'z');
+    await fs.writeFile(filePath, content);
+    const requested: number[] = [];
+    const open = fs.open.bind(fs);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.open>
+    ) => {
+      const handle = await open(...args);
+      const read = handle.read.bind(handle) as (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => Promise<{ bytesRead: number; buffer: Buffer }>;
+      // A network filesystem returning at most 48 KB per read.
+      return Object.assign(handle, {
+        read: (buffer: Buffer, offset: number, length: number, position: number) => {
+          requested.push(length);
+          return read(buffer, offset, Math.min(length, 48 * 1024), position);
+        },
+      });
+    }) as typeof fs.open);
+    let digest: Awaited<ReturnType<typeof hashFile>>;
+    try {
+      digest = await hashFile(filePath);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(digest).toEqual({ sha256: sha256(content), size: content.length });
+    expect(requested.slice(0, 3)).toEqual([64 * 1024, 64 * 1024, 1024 * 1024]);
+  });
+
   it('does not stat the file', async () => {
     const filePath = path.join(ROOT, 'nostat.bin');
     await fs.writeFile(filePath, Buffer.alloc(100 * 1024, 'y'));

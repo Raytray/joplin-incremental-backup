@@ -495,12 +495,33 @@ describe('getChangeFingerprint', () => {
       await gate;
       return realGet(resource, query);
     });
+    const fingerprint = getChangeFingerprint({ includeNoteTags: false });
     try {
-      const fingerprint = getChangeFingerprint({ includeNoteTags: false });
       await vi.waitFor(() => expect(started).toHaveLength(4));
       expect(new Set(started)).toEqual(new Set(['notes', 'resources', 'folders', 'tags']));
+    } finally {
       release();
-      await fingerprint;
+      await fingerprint.catch(() => undefined);
+      get.mockRestore();
+    }
+  });
+
+  it('waits for the other reads to finish before reporting a failed one', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1 }], folders: [] });
+    const finished: string[] = [];
+    const realGet = joplin.data.get.bind(joplin.data);
+    const get = vi.spyOn(joplin.data, 'get').mockImplementation(async (resource, query) => {
+      if (String(resource) === 'resources') throw new Error('database is locked');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const result = await realGet(resource, query);
+      finished.push(String(resource));
+      return result;
+    });
+    try {
+      await expect(getChangeFingerprint({ includeNoteTags: false })).rejects.toThrow(
+        'database is locked',
+      );
+      expect(new Set(finished)).toEqual(new Set(['notes', 'folders', 'tags']));
     } finally {
       get.mockRestore();
     }

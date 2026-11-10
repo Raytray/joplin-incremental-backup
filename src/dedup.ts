@@ -40,21 +40,8 @@ export interface DedupResult {
 }
 
 export interface DedupOptions {
-  /**
-   * Injectable SHA-256 implementation (used by tests). By default files are
-   * hashed with `hashFile`, which also gives their size without a `stat`;
-   * with an injected hasher the size takes a `stat`.
-   */
-  computeHash?: (filePath: string) => Promise<string>;
-}
-
-function digester(options: DedupOptions): (filePath: string) => Promise<FileDigest> {
-  const { computeHash } = options;
-  if (!computeHash) return (filePath) => hashFile(filePath);
-  return async (filePath) => ({
-    sha256: await computeHash(filePath),
-    size: (await fs.stat(filePath)).size,
-  });
+  /** Injectable hasher (used by tests); defaults to `hashFile`. */
+  hashFile?: (filePath: string) => Promise<FileDigest>;
 }
 
 export function buildContentIndex(manifest: Manifest | null | undefined): ContentIndex {
@@ -188,7 +175,7 @@ export async function dedup(
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const sizes = new Map<string, number>();
-  const digest = digester(options);
+  const digest = options.hashFile ?? ((filePath: string) => hashFile(filePath));
   /**
    * Resolves to whether hardlinks work on this filesystem, settled by the
    * first link attempt of the run. Every later file waits for it, so an
@@ -298,7 +285,7 @@ export async function stageFromLocal(
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const sizes = new Map<string, number>();
-  const digest = digester(options);
+  const digest = options.hashFile ?? ((filePath: string) => hashFile(filePath));
   /** Settled by the first link attempt of the run, as in `dedup`. */
   let linkSupport: Promise<boolean> | null = null;
 
