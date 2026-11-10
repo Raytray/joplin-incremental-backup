@@ -1,6 +1,7 @@
 import { logger } from './logger';
 import { setLastBackupResult, setLastBackupResultJson } from './settings';
-import type { BackupChanges } from './backup';
+import { toManifestKey } from './platform';
+import type { Manifest } from './manifest';
 
 /**
  * How many paths of each change list, and how many warnings, the persisted
@@ -9,6 +10,43 @@ import type { BackupChanges } from './backup';
  * Joplin's settings database.
  */
 export const RECORDED_LIST_LIMIT = 20;
+
+export interface BackupChanges {
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  unchanged: number;
+}
+
+/**
+ * What changed between the previous snapshot and this export, by path.
+ * A path in both is modified when its hash differs, and unchanged otherwise
+ * (including when either hash is unknown).
+ */
+export function computeChanges(
+  previousManifest: Manifest | null,
+  currentFiles: readonly string[],
+  currentHashes: ReadonlyMap<string, string>,
+): BackupChanges {
+  const previousByPath = new Map(
+    (previousManifest?.files ?? []).map((file) => [toManifestKey(file.path), file.sha256]),
+  );
+  const currentPaths = new Set(currentFiles.map((file) => toManifestKey(file)));
+
+  const added = [...currentPaths].filter((p) => !previousByPath.has(p)).sort();
+  const deleted = [...previousByPath.keys()].filter((p) => !currentPaths.has(p)).sort();
+  const modified: string[] = [];
+  let unchanged = 0;
+  for (const p of currentPaths) {
+    if (!previousByPath.has(p)) continue;
+    const previousHash = previousByPath.get(p);
+    const currentHash = currentHashes.get(p);
+    if (previousHash && currentHash && previousHash !== currentHash) modified.push(p);
+    else unchanged += 1;
+  }
+  modified.sort();
+  return { added, modified, deleted, unchanged };
+}
 
 /** `BackupChanges` as persisted: exact counts, and the first paths of each list. */
 export interface RecordedChanges {

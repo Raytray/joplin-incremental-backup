@@ -33,8 +33,14 @@ import {
   setLastSnapshot,
 } from './settings';
 import { ToastType } from 'api/types';
-import { describeWarnings, persistResult, recordChanges, recordWarnings } from './result';
-import type { BackupWarning } from './result';
+import {
+  computeChanges,
+  describeWarnings,
+  persistResult,
+  recordChanges,
+  recordWarnings,
+} from './result';
+import type { BackupChanges, BackupWarning } from './result';
 import {
   checkExportCompleteness,
   collectVaultInventory,
@@ -89,13 +95,6 @@ const TRANSIENT_EXPORT_ERROR_PATTERNS = [
 // ---------------------------------------------------------------------------
 
 export type BackupStatus = 'success' | 'skipped';
-
-export interface BackupChanges {
-  added: string[];
-  modified: string[];
-  deleted: string[];
-  unchanged: number;
-}
 
 export interface BackupResult {
   status: BackupStatus;
@@ -686,27 +685,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     logger.info(`Hashed ${activeFiles.length} file(s) (${formatBytes(exportedBytes)}).`);
 
     // Semantic change summary relative to the previous snapshot.
-    const previousFiles = lastManifest?.files ?? [];
-    const previousByPath = new Map(previousFiles.map((f) => [toManifestKey(f.path), f.sha256]));
-    const currentPaths = activeFiles.map((f) => toManifestKey(f));
-    const previousPathSet = new Set(previousByPath.keys());
-    const currentPathSet = new Set(currentPaths);
-    const added = [...currentPathSet].filter((p) => !previousPathSet.has(p)).sort();
-    const deleted = [...previousPathSet].filter((p) => !currentPathSet.has(p)).sort();
-    const modified: string[] = [];
-    let unchangedFiles = 0;
-    for (const p of currentPathSet) {
-      if (!previousPathSet.has(p)) continue;
-      const prevHash = previousByPath.get(p);
-      const currHash = dedupResult.hashes.get(p);
-      if (prevHash && currHash && prevHash !== currHash) {
-        modified.push(p);
-      } else {
-        unchangedFiles += 1;
-      }
-    }
-    modified.sort();
-    const changes: BackupChanges = { added, modified, deleted, unchanged: unchangedFiles };
+    const changes = computeChanges(lastManifest, activeFiles, dedupResult.hashes);
 
     const joplinVersion = await resolveJoplinVersion();
     const requestedName = generateSnapshotName(options.now ?? new Date());
