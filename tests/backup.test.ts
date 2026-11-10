@@ -1010,6 +1010,23 @@ describe('describeWarnings', () => {
 });
 
 describe('runBackup — success bookkeeping', () => {
+  it('records counts and only the first changed paths, keeping the full lists in the result', async () => {
+    const files = Array.from({ length: 30 }, (_, i) => ({
+      path: `n${i}.md`,
+      content: `note ${i}`,
+    }));
+    stubExport(files);
+
+    const result = await run();
+
+    expect(result.changes?.added).toHaveLength(30);
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record.changes.addedCount).toBe(30);
+    expect(record.changes.added).toHaveLength(20);
+    expect(record.changes.added).toEqual(result.changes?.added.slice(0, 20));
+    expect(record).toMatchObject({ status: 'success', warningCount: 0, warnings: [] });
+  });
+
   it('reports the hardlink fallback as a warning without calling the snapshot incomplete', async () => {
     await run();
 

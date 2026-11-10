@@ -7,7 +7,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { expect } from 'vitest';
-import type { BackupChanges } from '../src/backup';
+import type { RecordedChanges } from '../src/result';
 import type { Manifest } from '../src/manifest';
 import { JoplinInstance, sleep, waitFor } from './joplin';
 
@@ -24,7 +24,7 @@ export const LOCK_FILENAME = '.backup.lock';
 export interface RunRecord {
   status?: string;
   snapshotName?: string;
-  changes?: BackupChanges;
+  changes?: RecordedChanges;
   warnings?: string[];
   message?: string;
   /** Set on failed runs instead of `message`. */
