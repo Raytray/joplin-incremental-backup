@@ -482,6 +482,30 @@ describe('runBackup — setup failures', () => {
 });
 
 describe('getChangeFingerprint', () => {
+  it('reads notes, resources, notebooks and tags at the same time', async () => {
+    setData({ notes: [{ id: 'n1', updated_time: 1 }], folders: [] });
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realGet = joplin.data.get.bind(joplin.data);
+    const get = vi.spyOn(joplin.data, 'get').mockImplementation(async (resource, query) => {
+      started.push(String(resource));
+      await gate;
+      return realGet(resource, query);
+    });
+    try {
+      const fingerprint = getChangeFingerprint({ includeNoteTags: false });
+      await vi.waitFor(() => expect(started).toHaveLength(4));
+      expect(new Set(started)).toEqual(new Set(['notes', 'resources', 'folders', 'tags']));
+      release();
+      await fingerprint;
+    } finally {
+      get.mockRestore();
+    }
+  });
+
   it('collects note, resource, notebook and tag counts and times', async () => {
     setData({
       notes: [
@@ -1020,6 +1044,30 @@ describe('describeWarnings', () => {
 });
 
 describe('runBackup — success bookkeeping', () => {
+  it('does not stat the exported files, and records their sizes from hashing', async () => {
+    stubExport([
+      { path: 'n1.md', content: 'hello' },
+      { path: 'resources/r1', content: 'x'.repeat(70 * 1024) },
+    ]);
+    const stat = vi.spyOn(fs, 'stat');
+    let result: Awaited<ReturnType<typeof run>>;
+    let statted: string[];
+    try {
+      result = await run();
+    } finally {
+      // Read the calls first: mockRestore clears them.
+      statted = stat.mock.calls.map(([p]) => String(p));
+      stat.mockRestore();
+    }
+
+    expect(statted.filter((p) => p.endsWith('n1.md') || p.endsWith('r1'))).toEqual([]);
+    const manifest = await readManifest(result!.snapshotDir!);
+    expect(manifest?.files.map((f) => [f.path, f.size])).toEqual([
+      ['n1.md', 5],
+      ['resources/r1', 70 * 1024],
+    ]);
+  });
+
   it('still reports success when the result cannot be recorded', async () => {
     const realSetValue = joplin.settings.setValue.bind(joplin.settings);
     const setValue = vi

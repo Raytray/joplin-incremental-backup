@@ -97,6 +97,7 @@ describe('dedup', () => {
 
     expect(result).toMatchObject({ hardlinked: 1, copied: 0, unchanged: 0 });
     expect(result.hashes.get('a.txt')).toBe(sha256('hello'));
+    expect(result.sizes.get('a.txt')).toBe(5);
     expect(await fs.readFile(path.join(ACTIVE, 'a.txt'), 'utf8')).toBe('hello');
   });
 

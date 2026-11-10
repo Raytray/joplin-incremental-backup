@@ -2,13 +2,14 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   collectFilesRecursive,
-  computeFileSha256,
   errorCode,
+  hashFile,
   isHardlinkUnsupportedError,
   mapWithConcurrency,
   toDedupeKey,
   toManifestKey,
 } from './platform';
+import type { FileDigest } from './platform';
 import { logger } from './logger';
 import type { DeduplicationMode, FileEntry, Manifest } from './manifest';
 
@@ -34,13 +35,26 @@ export interface DedupResult {
   failed: number;
   /** Normalized relative path (`toManifestKey`) → SHA-256. */
   hashes: Map<string, string>;
+  /** Normalized relative path (`toManifestKey`) → size in bytes, as hashed. */
+  sizes: Map<string, number>;
 }
 
 export interface DedupOptions {
-  /** Injectable SHA-256 implementation (defaults to the streaming one). */
-  computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
-  /** Known file sizes, keyed by `toManifestKey` relative path. */
-  fileSizes?: ReadonlyMap<string, number>;
+  /**
+   * Injectable SHA-256 implementation (used by tests). By default files are
+   * hashed with `hashFile`, which also gives their size without a `stat`;
+   * with an injected hasher the size takes a `stat`.
+   */
+  computeHash?: (filePath: string) => Promise<string>;
+}
+
+function digester(options: DedupOptions): (filePath: string) => Promise<FileDigest> {
+  const { computeHash } = options;
+  if (!computeHash) return (filePath) => hashFile(filePath);
+  return async (filePath) => ({
+    sha256: await computeHash(filePath),
+    size: (await fs.stat(filePath)).size,
+  });
 }
 
 export function buildContentIndex(manifest: Manifest | null | undefined): ContentIndex {
@@ -173,7 +187,8 @@ export async function dedup(
   const files = activeFiles ? [...activeFiles] : await collectFilesRecursive(activeDir);
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
-  const computeHash = options.computeHash ?? computeFileSha256;
+  const sizes = new Map<string, number>();
+  const digest = digester(options);
   /**
    * Resolves to whether hardlinks work on this filesystem, settled by the
    * first link attempt of the run. Every later file waits for it, so an
@@ -187,8 +202,9 @@ export async function dedup(
     async (relativePath): Promise<DeduplicationMode | 'failed' | null> => {
       const key = toManifestKey(relativePath);
       const activePath = path.join(activeDir, relativePath);
-      const sha256 = await computeHash(activePath, options.fileSizes?.get(key));
+      const { sha256, size } = await digest(activePath);
       hashes.set(key, sha256);
+      sizes.set(key, size);
 
       if (!previousSnapshotDir) return null;
 
@@ -230,12 +246,12 @@ export async function dedup(
     },
   );
 
-  return { ...countModes(modes), hashes };
+  return { ...countModes(modes), hashes, sizes };
 }
 
 function countModes(
   modes: ReadonlyArray<DeduplicationMode | 'failed' | null>,
-): Omit<DedupResult, 'hashes'> {
+): Omit<DedupResult, 'hashes' | 'sizes'> {
   let hardlinked = 0;
   let copied = 0;
   let unchanged = 0;
@@ -281,7 +297,8 @@ export async function stageFromLocal(
 ): Promise<DedupResult> {
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
-  const computeHash = options.computeHash ?? computeFileSha256;
+  const sizes = new Map<string, number>();
+  const digest = digester(options);
   /** Settled by the first link attempt of the run, as in `dedup`. */
   let linkSupport: Promise<boolean> | null = null;
 
@@ -297,8 +314,9 @@ export async function stageFromLocal(
       const key = toManifestKey(relativePath);
       const localPath = path.join(localDir, relativePath);
       const targetPath = path.join(targetDir, relativePath);
-      const sha256 = await computeHash(localPath, options.fileSizes?.get(key));
+      const { sha256, size } = await digest(localPath);
       hashes.set(key, sha256);
+      sizes.set(key, size);
 
       const match = previousSnapshotDir
         ? findMatch(index, toDedupeKey(relativePath), sha256)
@@ -348,5 +366,5 @@ export async function stageFromLocal(
     },
   );
 
-  return { ...countModes(modes), hashes };
+  return { ...countModes(modes), hashes, sizes };
 }

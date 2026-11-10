@@ -9,7 +9,6 @@ import {
   LockError,
   assertDiskSpace,
   atomicWriteFile,
-  collectEntries,
   collectFilesRecursive,
   computeFileSha256,
   DEFAULT_MIN_FREE_BYTES,
@@ -238,9 +237,10 @@ export interface BackupOptions {
   /** Injectable clock for deterministic snapshot names. */
   now?: Date;
   /**
-   * Injectable SHA-256 implementation (defaults to the streaming one). The
-   * optional `sizeHint` lets the implementation pick a chunk size without an
-   * extra `stat` call.
+   * Injectable SHA-256 implementation (used by tests; defaults to the
+   * streaming one). The optional `sizeHint` lets the implementation pick a
+   * chunk size. During a backup an injected hasher costs a `stat` per file,
+   * which the default one avoids.
    */
   computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
   /**
@@ -293,7 +293,6 @@ interface ResolvedContext {
   exportRetries: number;
   /** Undefined means use `assertDiskSpace`'s default threshold. */
   minFreeBytes?: number;
-  computeHash: (filePath: string, sizeHint?: number) => Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,10 +520,13 @@ export async function collectVaultInventory(
   const { includeNoteTags = true } = options;
   const noteIds: string[] = [];
 
-  const notes = await readItemTimes('notes', (id) => noteIds.push(id));
-  const resources = await readItemTimes('resources');
-  const folders = await readItemTimes('folders');
-  const tags = await readItemTimes('tags');
+  // Independent Data API reads: fetch them together.
+  const [notes, resources, folders, tags] = await Promise.all([
+    readItemTimes('notes', (id) => noteIds.push(id)),
+    readItemTimes('resources'),
+    readItemTimes('folders'),
+    readItemTimes('tags'),
+  ]);
 
   let noteTagDigest: string | undefined;
   if (includeNoteTags) {
@@ -761,7 +763,6 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
     staleLockMs: options.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
     exportRetries: options.exportRetries ?? DEFAULT_EXPORT_RETRIES,
     minFreeBytes: options.minFreeBytes,
-    computeHash: options.computeHash ?? computeFileSha256,
   };
 }
 
@@ -1093,17 +1094,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
 
     logger.info('Collecting exported files...');
-    const activeEntries = await collectEntries(exportDir, exportDir);
-    if (activeEntries.length === 0) {
+    // Paths only: hashing reads every byte anyway and gives the sizes, so a
+    // `stat` per file here would only add I/O on the backup drive.
+    const activeFiles = await collectFilesRecursive(exportDir);
+    if (activeFiles.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
     }
-    const activeFiles = activeEntries.map((e) => e.path);
-    const fileSizes = new Map<string, number>(
-      activeEntries.map((e) => [toManifestKey(e.path), e.size]),
-    );
-    logger.info(
-      `Exported ${activeFiles.length} file(s) (${formatBytes(activeEntries.reduce((s, e) => s + e.size, 0))}).`,
-    );
+    logger.info(`Exported ${activeFiles.length} file(s).`);
 
     // Joplin's RAW exporter silently skips items it cannot handle (still-encrypted
     // notes, resources of trashed notes, …) while still reporting success. Compare
@@ -1126,7 +1123,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       ...stagingWarnings,
     ];
 
-    const dedupOptions = { computeHash: context.computeHash, fileSizes };
+    const dedupOptions = { computeHash: options.computeHash };
     let dedupResult: DedupResult;
     if (localDir) {
       logger.info('Writing new and changed files to the backup drive...');
@@ -1148,6 +1145,10 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         dedupOptions,
       );
     }
+
+    let exportedBytes = 0;
+    for (const size of dedupResult.sizes.values()) exportedBytes += size;
+    logger.info(`Hashed ${activeFiles.length} file(s) (${formatBytes(exportedBytes)}).`);
 
     // Semantic change summary relative to the previous snapshot.
     const previousFiles = lastManifest?.files ?? [];
@@ -1190,7 +1191,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       createdAt: Date.now(),
       deduplication: getDeduplicationMode(dedupResult),
     };
-    const manifest = await buildManifest(activeDir, meta, activeEntries, dedupResult.hashes);
+    const manifestEntries = activeFiles.map((filePath) => ({
+      path: filePath,
+      size: dedupResult.sizes.get(toManifestKey(filePath))!,
+    }));
+    const manifest = await buildManifest(activeDir, meta, manifestEntries, dedupResult.hashes);
     await writeManifest(activeDir, manifest);
 
     await safeRmDir(snapshotDir);
