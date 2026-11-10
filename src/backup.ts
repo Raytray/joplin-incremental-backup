@@ -6,6 +6,7 @@ import joplin from 'api';
 import { logger } from './logger';
 import {
   acquireLock,
+  LockError,
   assertDiskSpace,
   atomicWriteFile,
   collectEntries,
@@ -249,12 +250,12 @@ export interface BackupOptions {
    */
   localStagingRoot?: string;
   /**
-   * Show an error toast if the run fails (default `true`). The scheduler turns
-   * it off after the first of several failures in a row, so an unplugged
-   * drive does not raise a toast on every retry. The failure is still logged
-   * and recorded as the last backup result.
+   * Leave out the "Backup started…" and "Backup failed" toasts (default
+   * `false`). The scheduler sets it on retries after a failure, so an
+   * unplugged drive does not raise a toast on every retry. Failures are still
+   * logged and recorded as the last backup result, and a success still toasts.
    */
-  notifyOnFailure?: boolean;
+  quiet?: boolean;
 }
 
 export interface VerifyResult {
@@ -924,17 +925,21 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
-    await recordFailure(
-      startTime,
-      options.now ?? new Date(),
-      error,
-      options.notifyOnFailure ?? true,
-    );
+    await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
     throw error;
   }
   const { settings, backupRoot, lockPath, activeDir } = context;
 
-  await acquireLock(lockPath, context.staleLockMs);
+  try {
+    await acquireLock(lockPath, context.staleLockMs);
+  } catch (error) {
+    // Contention is not a failure: the run holding the lock records its own
+    // result. Anything else (e.g. a read-only drive) is.
+    if (!(error instanceof LockError)) {
+      await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
+    }
+    throw error;
+  }
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
   /** Local directory the export goes to, when staging locally. */
   let localDir: string | null = null;
@@ -944,9 +949,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     if (supersededBy !== null) return supersededResult(supersededBy);
 
     logger.info('Starting backup run...');
-    void joplin.views.dialogs
-      .showToast({ message: 'Backup started…', type: ToastType.Info })
-      .catch(() => undefined);
+    if (!options.quiet) {
+      void joplin.views.dialogs
+        .showToast({ message: 'Backup started…', type: ToastType.Info })
+        .catch(() => undefined);
+    }
 
     const lastSnapshotName = await resolveLastSnapshot(
       backupRoot,
@@ -1265,12 +1272,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    await recordFailure(
-      startTime,
-      options.now ?? new Date(),
-      error,
-      options.notifyOnFailure ?? true,
-    );
+    await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
     throw error;
   } finally {
     heartbeat.stop();

@@ -10,7 +10,7 @@ import {
   SETTING_KEYS,
 } from './settings';
 import type { Settings } from './settings';
-import { errorCode } from './platform';
+import { LockError } from './platform';
 import { listSnapshots } from './retention';
 
 export { parseLastBackup } from './settings';
@@ -49,6 +49,13 @@ export const FAILURE_BACKOFF_MS: readonly number[] = [
  * delays are split into chunks of at most this value and re-armed.
  */
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** How a scheduled run ended. */
+type RunOutcome =
+  | { kind: 'ok'; result: BackupResult }
+  /** Another run was in flight, here or in another Joplin instance. */
+  | { kind: 'busy' }
+  | { kind: 'failed' };
 
 /** Runs one scheduled backup; injected in tests. */
 export type BackupRunner = (options?: BackupOptions) => Promise<BackupResult>;
@@ -107,7 +114,7 @@ export class Scheduler {
   private observedLastBackup: number | undefined;
   /**
    * Scheduled runs that have failed in a row. Drives the retry backoff, and
-   * only the first failure in a row shows an error toast.
+   * runs after the first failure are quiet (no start or failure toast).
    */
   private consecutiveFailures = 0;
 
@@ -227,37 +234,37 @@ export class Scheduler {
     this.armAt(lastBackupMs + this.intervalMs);
   }
 
-  /**
-   * Run a backup, skipping if one is already in flight. Returns `null` when
-   * the run failed or could not start; only a real failure counts towards
-   * `consecutiveFailures`.
-   */
+  /** Run a backup, skipping if one is already in flight. `null` unless it succeeded. */
   async executeScheduledBackup(options?: BackupOptions): Promise<BackupResult | null> {
+    const outcome = await this.attempt(options);
+    return outcome.kind === 'ok' ? outcome.result : null;
+  }
+
+  /**
+   * Run a backup, quietly if the previous scheduled runs failed (unless the
+   * caller says otherwise). Leaves `consecutiveFailures` to `tick`, which
+   * knows whether the run still belongs to the current schedule.
+   */
+  private async attempt(options?: BackupOptions): Promise<RunOutcome> {
     if (this.running) {
       logger.warn('Scheduled backup already in progress; skipping this tick.');
-      return null;
+      return { kind: 'busy' };
     }
 
     this.running = true;
     try {
       const result = await this.runBackup({
         ...options,
-        notifyOnFailure: this.consecutiveFailures === 0,
+        quiet: options?.quiet ?? this.consecutiveFailures > 0,
       });
-      this.consecutiveFailures = 0;
-      return result;
+      return { kind: 'ok', result };
     } catch (error) {
-      if (errorCode(error) === 'EEXIST') {
+      if (error instanceof LockError) {
         logger.warn('Another backup holds the lock; skipping this scheduled run.');
-      } else {
-        this.consecutiveFailures += 1;
-        logger.error(
-          `Scheduled backup failed (${this.consecutiveFailures} in a row); ` +
-            `retrying in ${formatDuration(this.failureRetryDelay())}.`,
-          error,
-        );
+        return { kind: 'busy' };
       }
-      return null;
+      logger.error('Scheduled backup failed.', error);
+      return { kind: 'failed' };
     } finally {
       this.running = false;
     }
@@ -302,14 +309,16 @@ export class Scheduler {
 
     // Repeat the check once the lock is held: a backup that was running when
     // this timer fired may finish while this one waits to start.
-    const failuresBefore = this.consecutiveFailures;
-    const result = await this.executeScheduledBackup(
+    const outcome = await this.attempt(
       observed === undefined ? undefined : { skipIfBackedUpAfter: observed },
     );
 
     // The settings changed while the backup ran: whoever changed them has
-    // already re-armed (or paused) the schedule.
+    // already re-armed (or paused) the schedule and reset the failure count.
     if (generation !== this.generation) return;
+
+    if (outcome.kind === 'ok') this.consecutiveFailures = 0;
+    if (outcome.kind === 'failed') this.consecutiveFailures += 1;
 
     // This run (or the one that superseded it) moved `lastBackup`; take the
     // new value as the baseline so the next tick does not mistake it for
@@ -317,13 +326,23 @@ export class Scheduler {
     this.observedLastBackup = await this.readLastBackup();
     if (generation !== this.generation) return;
 
-    if (result === null) {
-      // Retry sooner than a full interval would: after a fixed delay when
-      // another run was in flight, backing off while failures repeat.
-      const failed = this.consecutiveFailures > failuresBefore;
-      this.armAt(this.now() + (failed ? this.failureRetryDelay() : RETRY_DELAY_MS));
+    if (outcome.kind === 'busy') {
+      this.armAt(this.now() + RETRY_DELAY_MS);
       return;
     }
+
+    if (outcome.kind === 'failed') {
+      // Retry sooner than a full interval would, backing off while failures repeat.
+      const delay = this.failureRetryDelay();
+      logger.warn(
+        `${this.consecutiveFailures} scheduled backup(s) failed in a row; ` +
+          `retrying in ${formatDuration(delay)}.`,
+      );
+      this.armAt(this.now() + delay);
+      return;
+    }
+
+    const { result } = outcome;
 
     if (result.supersededBy !== undefined) {
       this.armAt(result.supersededBy + this.intervalMs);
