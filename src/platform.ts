@@ -373,3 +373,32 @@ export async function collectFilesRecursive(dir: string, baseDir: string = dir):
   await walk(dir);
   return results;
 }
+
+/** Lock age after which it is considered abandoned. */
+export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
+/** Floor for the lock heartbeat interval, regardless of the stale threshold. */
+const MIN_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Refresh the lock while a backup runs. A large vault can take longer than the
+ * stale threshold to export, and a lock that is still being renewed must never
+ * be mistaken for an abandoned one.
+ */
+export function startLockHeartbeat(
+  lockPath: string,
+  staleLockMs: number,
+  label = 'backup lock',
+): { stop: () => void } {
+  const intervalMs = Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(staleLockMs / 3));
+  const timer = setInterval(() => {
+    void touchLock(lockPath).catch((error) => {
+      logger.warn(`Failed to refresh the ${label}.`, error);
+    });
+  }, intervalMs);
+
+  // The heartbeat must not keep the plugin's event loop alive on its own.
+  const unref = (timer as unknown as { unref?: () => void }).unref;
+  if (typeof unref === 'function') unref.call(timer);
+
+  return { stop: () => clearInterval(timer) };
+}

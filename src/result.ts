@@ -141,3 +141,57 @@ export function formatLastBackupResult(summary: string, json: string): string {
 
   return message;
 }
+
+/**
+ * What a warning affects:
+ * - `export`: an item the exporter itself reported as skipped.
+ * - `completeness`: items inferred missing from a database/export count mismatch.
+ * - `storage`: the snapshot is complete, but deduplication was limited, so it
+ *   uses more disk space than expected (e.g. no hardlink support).
+ * - `staging`: local staging was requested but could not be used, so the
+ *   whole export was written to the backup drive.
+ */
+export type BackupWarningKind = 'export' | 'completeness' | 'storage' | 'staging';
+
+export interface BackupWarning {
+  kind: BackupWarningKind;
+  /** Full text, shown in the warnings list. */
+  message: string;
+  /** Short form for the result message (e.g. "3 note(s)"); defaults to `message`. */
+  summary?: string;
+}
+
+/**
+ * Summary sentences for the result message, derived from the tagged warnings
+ * so that every warning source is reflected without extra wiring.
+ */
+export function describeWarnings(warnings: readonly BackupWarning[]): string {
+  const ofKind = (kind: BackupWarningKind) => warnings.filter((w) => w.kind === kind);
+  const exported = ofKind('export');
+  const completeness = ofKind('completeness');
+  const storage = ofKind('storage');
+  const staging = ofKind('staging');
+
+  const parts: string[] = [];
+  if (exported.length > 0) {
+    parts.push(`${exported.length} item(s) were skipped by the export.`);
+  }
+  if (completeness.length > 0) {
+    parts.push(
+      `Missing from the export: ${completeness.map((w) => w.summary ?? w.message).join(', ')}.`,
+    );
+  }
+  if (exported.length > 0 || completeness.length > 0) {
+    parts.push('The snapshot may be incomplete (see warnings).');
+  }
+  if (storage.length > 0) {
+    parts.push(
+      `Deduplication was limited, so this snapshot uses more disk space than expected ` +
+        `(${storage.length} warning(s), see warnings).`,
+    );
+  }
+  if (staging.length > 0) {
+    parts.push('The export could not be staged locally and was written to the backup drive.');
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
+}

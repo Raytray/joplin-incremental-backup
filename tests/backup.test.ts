@@ -10,32 +10,36 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import joplin from '../src/__mocks__/joplin';
-import { digestPairs } from '../src/backup';
+import {
+  extractExportWarnings,
+  isTransientExportError,
+  LOCAL_STAGING_DIR_NAME,
+  prepareBackupRoot,
+  recoverBackupDirs,
+  retryTransient,
+  ROOT_MARKER_FILENAME,
+  runBackup,
+} from '../src/backup';
+import {
+  digestPairs,
+  fingerprintsEqual,
+  getAllFolderIds,
+  getChangeFingerprint,
+} from '../src/inventory';
+import { describeWarnings } from '../src/result';
 import {
   ACTIVE_DIR_PREFIX,
   createStagingDirName,
-  describeWarnings,
-  extractExportWarnings,
-  fingerprintsEqual,
   generateSnapshotName,
-  getAllFolderIds,
-  getChangeFingerprint,
-  isTransientExportError,
   LATEST_FILENAME,
   listStagingDirs,
-  LOCAL_STAGING_DIR_NAME,
   LOCK_FILENAME,
-  prepareBackupRoot,
-  recoverBackupDirs,
   resolveBackupRoot,
-  ROOT_MARKER_FILENAME,
   resolveLastSnapshot,
   resolveUniqueSnapshotName,
-  retryTransient,
-  runBackup,
-  verifyBackup,
-} from '../src/backup';
-import { snapshotDirPath } from '../src/backup';
+  snapshotDirPath,
+} from '../src/snapshots';
+import { verifyBackup } from '../src/verify';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { pruneSnapshots, VERIFY_LEASE_PREFIX } from '../src/retention';
 import { logger } from '../src/logger';

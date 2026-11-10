@@ -14,14 +14,14 @@ import { vol } from 'memfs';
 import '../src/index';
 
 const pluginScript = mockState.pluginScript;
+import { runBackup } from '../src/backup';
 import {
   createStagingDirName,
   LATEST_FILENAME,
   listStagingDirs,
   LOCK_FILENAME,
-  runBackup,
-  verifyBackup,
-} from '../src/backup';
+} from '../src/snapshots';
+import { verifyBackup } from '../src/verify';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import {
   CREATE_COMMAND,
