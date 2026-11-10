@@ -145,6 +145,7 @@ describe('touchLock / hasFreshLock', () => {
     const lockPath = path.join(ROOT, 'missing.lock');
     await expect(touchLock(lockPath)).resolves.toBeUndefined();
     await expect(hasFreshLock(lockPath, 60_000)).resolves.toBe(false);
+    await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 

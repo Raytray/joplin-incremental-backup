@@ -1,6 +1,7 @@
 import { logger } from './logger';
 import { setLastBackupResult, setLastBackupResultJson } from './settings';
-import type { BackupChanges } from './backup';
+import { toManifestKey } from './platform';
+import type { Manifest } from './manifest';
 
 /**
  * How many paths of each change list, and how many warnings, the persisted
@@ -9,6 +10,43 @@ import type { BackupChanges } from './backup';
  * Joplin's settings database.
  */
 export const RECORDED_LIST_LIMIT = 20;
+
+export interface BackupChanges {
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  unchanged: number;
+}
+
+/**
+ * What changed between the previous snapshot and this export, by path.
+ * A path in both is modified when its hash differs, and unchanged otherwise
+ * (including when either hash is unknown).
+ */
+export function computeChanges(
+  previousManifest: Manifest | null,
+  currentFiles: readonly string[],
+  currentHashes: ReadonlyMap<string, string>,
+): BackupChanges {
+  const previousByPath = new Map(
+    (previousManifest?.files ?? []).map((file) => [toManifestKey(file.path), file.sha256]),
+  );
+  const currentPaths = new Set(currentFiles.map((file) => toManifestKey(file)));
+
+  const added = [...currentPaths].filter((p) => !previousByPath.has(p)).sort();
+  const deleted = [...previousByPath.keys()].filter((p) => !currentPaths.has(p)).sort();
+  const modified: string[] = [];
+  let unchanged = 0;
+  for (const p of currentPaths) {
+    if (!previousByPath.has(p)) continue;
+    const previousHash = previousByPath.get(p);
+    const currentHash = currentHashes.get(p);
+    if (previousHash && currentHash && previousHash !== currentHash) modified.push(p);
+    else unchanged += 1;
+  }
+  modified.sort();
+  return { added, modified, deleted, unchanged };
+}
 
 /** `BackupChanges` as persisted: exact counts, and the first paths of each list. */
 export interface RecordedChanges {
@@ -39,6 +77,11 @@ export type CompletedRecord = RecordTimes & {
   warningCount: number;
   message: string;
 };
+
+/** A run's duration as shown to the user, e.g. "1.2s". */
+export function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
 
 /** The run record stored in the `lastBackupResultJson` setting. */
 export type BackupRecord = FailedRecord | CompletedRecord;
@@ -132,7 +175,7 @@ export function formatLastBackupResult(summary: string, json: string): string {
   }
 
   if (typeof parsed.durationMs === 'number') {
-    message += `\n\nDuration: ${(parsed.durationMs / 1000).toFixed(1)}s`;
+    message += `\n\nDuration: ${formatSeconds(parsed.durationMs)}`;
   }
 
   const warnings = stringList(parsed.warnings);
@@ -140,4 +183,58 @@ export function formatLastBackupResult(summary: string, json: string): string {
   if (warningCount > 0) message += `\n${formatList('Warnings', warnings, warningCount)}`;
 
   return message;
+}
+
+/**
+ * What a warning affects:
+ * - `export`: an item the exporter itself reported as skipped.
+ * - `completeness`: items inferred missing from a database/export count mismatch.
+ * - `storage`: the snapshot is complete, but deduplication was limited, so it
+ *   uses more disk space than expected (e.g. no hardlink support).
+ * - `staging`: local staging was requested but could not be used, so the
+ *   whole export was written to the backup drive.
+ */
+export type BackupWarningKind = 'export' | 'completeness' | 'storage' | 'staging';
+
+export interface BackupWarning {
+  kind: BackupWarningKind;
+  /** Full text, shown in the warnings list. */
+  message: string;
+  /** Short form for the result message (e.g. "3 note(s)"); defaults to `message`. */
+  summary?: string;
+}
+
+/**
+ * Summary sentences for the result message, derived from the tagged warnings
+ * so that every warning source is reflected without extra wiring.
+ */
+export function describeWarnings(warnings: readonly BackupWarning[]): string {
+  const ofKind = (kind: BackupWarningKind) => warnings.filter((w) => w.kind === kind);
+  const exported = ofKind('export');
+  const completeness = ofKind('completeness');
+  const storage = ofKind('storage');
+  const staging = ofKind('staging');
+
+  const parts: string[] = [];
+  if (exported.length > 0) {
+    parts.push(`${exported.length} item(s) were skipped by the export.`);
+  }
+  if (completeness.length > 0) {
+    parts.push(
+      `Missing from the export: ${completeness.map((w) => w.summary ?? w.message).join(', ')}.`,
+    );
+  }
+  if (exported.length > 0 || completeness.length > 0) {
+    parts.push('The snapshot may be incomplete (see warnings).');
+  }
+  if (storage.length > 0) {
+    parts.push(
+      `Deduplication was limited, so this snapshot uses more disk space than expected ` +
+        `(${storage.length} warning(s), see warnings).`,
+    );
+  }
+  if (staging.length > 0) {
+    parts.push('The export could not be staged locally and was written to the backup drive.');
+  }
+  return parts.length > 0 ? ` ${parts.join(' ')}` : '';
 }

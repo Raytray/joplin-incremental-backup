@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import joplin from '../src/__mocks__/joplin';
 import { logger } from '../src/logger';
 import {
+  computeChanges,
   formatLastBackupResult,
+  formatSeconds,
   persistResult,
   RECORDED_LIST_LIMIT,
   recordChanges,
@@ -182,5 +184,58 @@ describe('formatLastBackupResult', () => {
   it('adds nothing for a failed run beyond its duration', () => {
     const json = JSON.stringify({ status: 'failed', durationMs: 500, error: 'boom' });
     expect(formatLastBackupResult('summary', json)).toBe('summary\n\nDuration: 0.5s');
+  });
+});
+
+describe('computeChanges', () => {
+  const manifest = (files: Array<[string, string]>) =>
+    ({ files: files.map(([p, sha256]) => ({ path: p, size: 1, sha256 })) }) as Parameters<
+      typeof computeChanges
+    >[0];
+
+  it('classifies paths as added, modified, deleted or unchanged, sorted', () => {
+    const changes = computeChanges(
+      manifest([
+        ['b.md', 'h1'],
+        ['same.md', 'h2'],
+        ['gone.md', 'h3'],
+      ]),
+      ['z-new.md', 'b.md', 'same.md', 'a-new.md'],
+      new Map([
+        ['b.md', 'changed'],
+        ['same.md', 'h2'],
+        ['z-new.md', 'x'],
+        ['a-new.md', 'y'],
+      ]),
+    );
+
+    expect(changes).toEqual({
+      added: ['a-new.md', 'z-new.md'],
+      modified: ['b.md'],
+      deleted: ['gone.md'],
+      unchanged: 1,
+    });
+  });
+
+  it('treats everything as added without a previous manifest', () => {
+    expect(computeChanges(null, ['a.md'], new Map())).toEqual({
+      added: ['a.md'],
+      modified: [],
+      deleted: [],
+      unchanged: 0,
+    });
+  });
+
+  it('counts a path with an unknown hash as unchanged', () => {
+    const changes = computeChanges(manifest([['a.md', 'h']]), ['a.md'], new Map());
+    expect(changes).toMatchObject({ modified: [], unchanged: 1 });
+  });
+});
+
+describe('formatSeconds', () => {
+  it('shows one decimal of seconds', () => {
+    expect(formatSeconds(0)).toBe('0.0s');
+    expect(formatSeconds(1234)).toBe('1.2s');
+    expect(formatSeconds(61_060)).toBe('61.1s');
   });
 });

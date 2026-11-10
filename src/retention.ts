@@ -3,10 +3,21 @@ import path from 'path';
 import type { Dirent } from 'fs';
 import { errorCode, safeRmDir } from './platform';
 
+export const DEFAULT_RETENTION = 5;
+export const MIN_RETENTION = 1;
+
+/**
+ * Snapshots to keep for a setting value: at least `MIN_RETENTION`, and
+ * `DEFAULT_RETENTION` for anything that isn't a finite number.
+ */
+export function clampRetention(value: unknown): number {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_RETENTION;
+  return Math.max(MIN_RETENTION, Math.floor(parsed));
+}
+
 /** `YYYYMMDDTHHMMSS` with an optional `-N` suffix for same-second runs. */
 export const SNAPSHOT_DIR_PATTERN = /^\d{8}T\d{6}(-\d+)?$/;
-
-const MIN_RETENTION = 1;
 
 /**
  * A verification in progress keeps its snapshot from being pruned by leaving
@@ -95,9 +106,7 @@ export async function pruneSnapshots(
   keepSnapshot?: string,
   staleLeaseMs = DEFAULT_STALE_LEASE_MS,
 ): Promise<string[]> {
-  const keep = Number.isFinite(retentionCount)
-    ? Math.max(MIN_RETENTION, Math.floor(retentionCount))
-    : MIN_RETENTION;
+  const keep = clampRetention(retentionCount);
 
   const snapshots = await listSnapshots(backupRoot);
   const deleteCount = Math.max(0, snapshots.length - keep);

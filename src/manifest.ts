@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   atomicWriteFile,
-  collectFilesRecursive,
+  errorCode,
   hashFile,
   mapWithConcurrency,
   toManifestKey,
@@ -123,7 +123,7 @@ export async function readManifest(snapshotDir: string): Promise<Manifest | null
   try {
     raw = await fs.readFile(manifestPath, 'utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    if (errorCode(error) === 'ENOENT') return null;
     throw error;
   }
 
@@ -141,29 +141,17 @@ export async function writeManifest(snapshotDir: string, manifest: Manifest): Pr
 }
 
 /**
- * Build a complete manifest for `snapshotDir`. When `precomputedHashes` is
- * supplied (from `dedup()`), matching hashes are reused instead of re-reading
- * every file.
- *
- * `filePaths` can be either plain relative paths (legacy) or objects with
- * `path` and `size`. Supplying sizes avoids a `stat` per file.
+ * Build the manifest for the files of `snapshotDir` in `fileList` (paths
+ * relative to it, with their sizes). Files with a hash in `precomputedHashes`
+ * (from `dedup()`) are not read again; the others are hashed.
  */
 export async function buildManifest(
   snapshotDir: string,
   meta: ManifestMeta,
-  filePaths?: readonly (string | { path: string; size: number })[],
+  fileList: readonly { path: string; size: number }[],
   precomputedHashes?: ReadonlyMap<string, string>,
 ): Promise<Manifest> {
-  const entries = filePaths
-    ? filePaths.map((entry) =>
-        typeof entry === 'string'
-          ? { path: toManifestKey(entry), size: undefined }
-          : { path: toManifestKey(entry.path), size: entry.size },
-      )
-    : (await collectFilesRecursive(snapshotDir)).map((filePath) => ({
-        path: toManifestKey(filePath),
-        size: undefined,
-      }));
+  const entries = fileList.map((entry) => ({ path: toManifestKey(entry.path), size: entry.size }));
   const uniqueSortedEntries = [...new Map(entries.map((e) => [e.path, e])).values()].sort((a, b) =>
     a.path.localeCompare(b.path),
   );
@@ -174,12 +162,8 @@ export async function buildManifest(
     async ({ path: relativePath, size }): Promise<FileEntry> => {
       const absolutePath = path.join(snapshotDir, relativePath);
       const precomputed = precomputedHashes?.get(toManifestKey(relativePath));
-      if (precomputed !== undefined && size !== undefined) {
-        return { path: relativePath, size, sha256: precomputed };
-      }
-      // One read gives both the hash and the size.
-      const digest = await hashFile(absolutePath, size);
-      return { path: relativePath, size: digest.size, sha256: precomputed ?? digest.sha256 };
+      const sha256 = precomputed ?? (await hashFile(absolutePath, size)).sha256;
+      return { path: relativePath, size, sha256 };
     },
   );
 

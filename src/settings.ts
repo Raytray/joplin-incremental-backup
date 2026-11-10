@@ -3,6 +3,8 @@ import joplin from 'api';
 import { SettingItemSubType, SettingItemType } from 'api/types';
 import type { SettingItem, SettingSection } from 'api/types';
 import { logger } from './logger';
+import { clampRetention, DEFAULT_RETENTION, MIN_RETENTION } from './retention';
+import { resolveBackupRoot } from './snapshots';
 
 export const SETTING_SECTION_NAME = 'incrementalBackup';
 
@@ -14,16 +16,15 @@ export const SETTING_KEYS = {
   stageLocally: 'stageLocally',
   lastBackup: 'lastBackup',
   lastSnapshot: 'lastSnapshot',
-  // Human-readable summary of the most recent backup run, shown in Options.
+  // Human-readable summary of the most recent backup run, shown by
+  // Tools > Show last backup result (not in Options).
   lastBackupResult: 'lastBackupResult',
   lastBackupResultJson: 'lastBackupResultJson',
   // JSON array of backup directories this plugin has set up (and marked).
   initializedBackupRoots: 'initializedBackupRoots',
 } as const;
 
-export const DEFAULT_RETENTION = 5;
 export const DEFAULT_INTERVAL_HOURS = 24;
-export const MIN_RETENTION = 1;
 
 const WIN32_MAX_SAFE_PATH_LENGTH = 180;
 
@@ -113,7 +114,8 @@ export function buildSettings(): Record<string, SettingItem> {
     [SETTING_KEYS.lastBackupResult]: {
       value: '',
       type: SettingItemType.String,
-      public: true,
+      // Shown by Tools > Show last backup result, not as an editable field.
+      public: false,
       section: SETTING_SECTION_NAME,
       label: 'Last backup result',
       description: 'Summary of the most recent backup run (start/finish/duration/changes).',
@@ -189,12 +191,6 @@ export async function registerSettings(): Promise<void> {
   await joplin.settings.registerSection(SETTING_SECTION_NAME, section);
   await joplin.settings.registerSettings({ ...buildSettings(), ...buildRetiredSettings() });
   await clearRetiredSettings();
-}
-
-export function clampRetention(value: unknown): number {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(parsed)) return DEFAULT_RETENTION;
-  return Math.max(MIN_RETENTION, Math.floor(parsed));
 }
 
 export function normalizeInterval(value: unknown): number {
@@ -362,4 +358,18 @@ export async function addInitializedBackupRoot(backupRoot: string): Promise<void
     SETTING_KEYS.initializedBackupRoots,
     JSON.stringify([...initializedBackupRoots, path.resolve(backupRoot)]),
   );
+}
+
+/**
+ * The backup root for this run: the explicit override (tests), otherwise the
+ * configured directory. Throws a user-facing error when the directory is unset
+ * or not absolute, so a bad setting can never resolve to a path in the
+ * working directory. This is the only place that decision is made.
+ */
+export function configuredBackupRoot(
+  settings: Settings,
+  options: { backupRoot?: string; profileName?: string },
+): string {
+  if (options.backupRoot !== undefined) return options.backupRoot;
+  return resolveBackupRoot(requireBackupPath(settings), options.profileName);
 }

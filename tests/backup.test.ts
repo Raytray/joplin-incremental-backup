@@ -10,36 +10,44 @@ import path from 'path';
 import { createHash } from 'crypto';
 import { vol } from 'memfs';
 import joplin from '../src/__mocks__/joplin';
-import { digestPairs } from '../src/backup';
+import {
+  extractExportWarnings,
+  isTransientExportError,
+  LOCAL_STAGING_DIR_NAME,
+  prepareBackupRoot,
+  recoverBackupDirs,
+  retryTransient,
+  ROOT_MARKER_FILENAME,
+  runBackup,
+} from '../src/backup';
+import {
+  collectVaultInventory,
+  digestPairs,
+  fingerprintsEqual,
+  getAllFolderIds,
+} from '../src/inventory';
+import { describeWarnings, formatSeconds } from '../src/result';
 import {
   ACTIVE_DIR_PREFIX,
   createStagingDirName,
-  describeWarnings,
-  extractExportWarnings,
-  fingerprintsEqual,
   generateSnapshotName,
-  getAllFolderIds,
-  getChangeFingerprint,
-  isTransientExportError,
   LATEST_FILENAME,
   listStagingDirs,
-  LOCAL_STAGING_DIR_NAME,
   LOCK_FILENAME,
-  prepareBackupRoot,
-  recoverBackupDirs,
   resolveBackupRoot,
-  ROOT_MARKER_FILENAME,
   resolveLastSnapshot,
   resolveUniqueSnapshotName,
-  retryTransient,
-  runBackup,
-  verifyBackup,
-} from '../src/backup';
-import { snapshotDirPath } from '../src/backup';
+  snapshotDirPath,
+} from '../src/snapshots';
+import { verifyBackup } from '../src/verify';
 import { readManifest, MANIFEST_FILENAME } from '../src/manifest';
 import { pruneSnapshots, VERIFY_LEASE_PREFIX } from '../src/retention';
 import { logger } from '../src/logger';
 import { mockState, resetMockJoplin } from '../src/__mocks__/joplin';
+
+/** The fingerprint part of the inventory. */
+const getChangeFingerprint = async (options?: Parameters<typeof collectVaultInventory>[0]) =>
+  (await collectVaultInventory(options)).fingerprint;
 import { MISSING_BACKUP_PATH_MESSAGE, SETTING_KEYS, SETTING_SECTION_NAME } from '../src/settings';
 
 const BACKUP_ROOT = '/backups';
@@ -617,6 +625,15 @@ describe('snapshot naming', () => {
     const base = '20260102T030405';
     await fs.mkdir(path.join(root, base), { recursive: true });
     await fs.mkdir(path.join(root, `${base}-2`), { recursive: true });
+
+    await expect(resolveUniqueSnapshotName(root, base)).resolves.toBe(`${base}-3`);
+  });
+
+  it('skips a name taken by a file or a dangling symlink, not only a directory', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const base = '20260102T030405';
+    await fs.writeFile(path.join(root, base), 'stray file');
+    await fs.symlink(path.join(root, 'nowhere'), path.join(root, `${base}-2`));
 
     await expect(resolveUniqueSnapshotName(root, base)).resolves.toBe(`${base}-3`);
   });
@@ -1593,7 +1610,9 @@ describe('runBackup — result timestamps', () => {
 
     expect(second.status).toBe('skipped');
     expect(mockState.values[SETTING_KEYS.lastBackup]).toBe(injectedIso);
-    expect(lastResult()).toBe(`Skipped (no changes) at ${injectedIso} — ${second.duration}`);
+    expect(lastResult()).toBe(
+      `Skipped (no changes) at ${injectedIso} — ${formatSeconds(second.durationMs!)}`,
+    );
     expect(lastRecord().finishedAt).toBe(injectedIso);
   });
 

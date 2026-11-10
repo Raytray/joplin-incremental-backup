@@ -82,6 +82,13 @@ describe('pruneSnapshots', () => {
     await expect(listSnapshots(ROOT)).resolves.toEqual(names);
   });
 
+  it('keeps the default number of snapshots for a non-numeric retention', async () => {
+    const names = Array.from({ length: 7 }, (_, index) => snapshotName(index));
+    await createSnapshots(names);
+
+    await expect(pruneSnapshots(ROOT, Number.NaN)).resolves.toEqual(names.slice(0, 2));
+  });
+
   it('clamps a retention of 0 to 1', async () => {
     const names = [snapshotName(0), snapshotName(1), snapshotName(2)];
     await createSnapshots(names);

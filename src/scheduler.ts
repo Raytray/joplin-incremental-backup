@@ -1,6 +1,7 @@
 import joplin from 'api';
 import { logger } from './logger';
-import { resolveBackupRoot, runBackup } from './backup';
+import { runBackup } from './backup';
+import { resolveBackupRoot } from './snapshots';
 import type { BackupOptions, BackupResult } from './backup';
 import {
   getSettings,

@@ -155,7 +155,12 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
 /**
  * Refresh a held lock so a long-running backup is never mistaken for an
  * abandoned one. The lock's mtime is what `acquireLock` uses to judge
- * staleness, so writing the current timestamp is enough to renew it.
+ * staleness, so writing to it is enough to renew it.
+ *
+ * Writing rather than `utimes`: setting explicit times needs ownership of the
+ * file (writing only needs write access), which fails on network shares that
+ * map owners (e.g. NFS root_squash), and it would stamp the client's clock
+ * where `acquireLock`'s write got the file server's.
  *
  * The file is opened without `O_CREAT`: a lock that has been released or
  * stolen in the meantime must not be resurrected by the heartbeat.
@@ -372,4 +377,33 @@ export async function collectFilesRecursive(dir: string, baseDir: string = dir):
   };
   await walk(dir);
   return results;
+}
+
+/** Lock age after which it is considered abandoned. */
+export const DEFAULT_STALE_LOCK_MS = 30 * 60 * 1000;
+/** Floor for the lock heartbeat interval, regardless of the stale threshold. */
+const MIN_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Refresh the lock while a backup runs. A large vault can take longer than the
+ * stale threshold to export, and a lock that is still being renewed must never
+ * be mistaken for an abandoned one.
+ */
+export function startLockHeartbeat(
+  lockPath: string,
+  staleLockMs: number,
+  label = 'backup lock',
+): { stop: () => void } {
+  const intervalMs = Math.max(MIN_HEARTBEAT_INTERVAL_MS, Math.floor(staleLockMs / 3));
+  const timer = setInterval(() => {
+    void touchLock(lockPath).catch((error) => {
+      logger.warn(`Failed to refresh the ${label}.`, error);
+    });
+  }, intervalMs);
+
+  // The heartbeat must not keep the plugin's event loop alive on its own.
+  const unref = (timer as unknown as { unref?: () => void }).unref;
+  if (typeof unref === 'function') unref.call(timer);
+
+  return { stop: () => clearInterval(timer) };
 }
