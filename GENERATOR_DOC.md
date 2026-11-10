@@ -50,9 +50,9 @@ In general all this is done automatically by the plugin generator, which will se
 
 ## Updating the plugin framework
 
-To update the plugin framework, run `npm run update`.
+**Not used in this repository**: the `update` script has been removed. The current generator's template pins older dev dependencies than this repo uses and would overwrite `tsconfig.json`, so update the dependencies directly instead (see the README).
 
-In general this command tries to do the right thing - in particular it's going to merge the changes in package.json and .gitignore instead of overwriting. It will also leave "/src" as well as README.md untouched.
+The generator's `npm run update` command tries to do the right thing - in particular it's going to merge the changes in package.json and .gitignore instead of overwriting. It will also leave "/src" as well as README.md untouched.
 
 The file that may cause problem is "webpack.config.js" because it's going to be overwritten. For that reason, if you want to change it, consider creating a separate JavaScript file and include it in webpack.config.js. That way, when you update, you only have to restore the line that include your file.
 

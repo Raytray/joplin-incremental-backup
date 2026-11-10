@@ -175,7 +175,9 @@ function readManifest(manifestPath) {
 function createPluginArchive(sourceDir, destPath) {
   const distFiles = glob
     .sync(`${sourceDir}/**/*`, { nodir: true, windowsPathsNoEscape: true })
-    .map((f) => f.substr(sourceDir.length + 1));
+    .map((f) => f.substr(sourceDir.length + 1))
+    // glob 9+ returns files in filesystem order; sort for a reproducible archive.
+    .sort();
 
   if (!distFiles.length)
     throw new Error('Plugin archive was not created because the "dist" directory is empty');
