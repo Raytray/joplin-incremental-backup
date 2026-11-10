@@ -13,13 +13,10 @@ import { JoplinInstance, sleep, waitFor } from './joplin';
 
 export const BACKUP_TIMEOUT_MS = 120_000;
 export const DAY_MS = 24 * 60 * 60 * 1000;
-/**
- * `ACTIVE_DIR_PREFIX` and `LOCK_FILENAME` from src/backup.ts, which cannot be
- * loaded here: it imports the Joplin plugin API, which only exists inside
- * Joplin.
- */
-export const ACTIVE_DIR_PREFIX = '_joplin_active_';
-export const LOCK_FILENAME = '.backup.lock';
+// snapshots.ts doesn't import the Joplin plugin API, so it loads outside Joplin.
+import { ACTIVE_DIR_PREFIX, LOCK_FILENAME } from '../src/snapshots';
+
+export { ACTIVE_DIR_PREFIX, LOCK_FILENAME };
 
 /**
  * The persisted run record as the tests read it: any field of either record

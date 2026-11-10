@@ -135,13 +135,10 @@ describe('touchLock / hasFreshLock', () => {
 
     expect(await hasFreshLock(lockPath, 60_000)).toBe(false);
 
-    const content = await fs.readFile(lockPath, 'utf8');
     await touchLock(lockPath);
 
     expect(await hasFreshLock(lockPath, 60_000)).toBe(true);
     expect((await fs.stat(lockPath)).mtime.getTime()).toBeGreaterThan(0);
-    // Only the mtime changes; the lock's content (its creation time) stays.
-    expect(await fs.readFile(lockPath, 'utf8')).toBe(content);
   });
 
   it('ignores a lock that no longer exists', async () => {

@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { clampRetention } from '../src/retention';
 import {
   addInitializedBackupRoot,
   isKnownBackupRoot,
   buildSettings,
-  clampRetention,
   getSettings,
   isSchedulerEnabled,
   normalizeInterval,

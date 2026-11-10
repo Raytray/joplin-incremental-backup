@@ -629,6 +629,15 @@ describe('snapshot naming', () => {
     await expect(resolveUniqueSnapshotName(root, base)).resolves.toBe(`${base}-3`);
   });
 
+  it('skips a name taken by a file or a dangling symlink, not only a directory', async () => {
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const base = '20260102T030405';
+    await fs.writeFile(path.join(root, base), 'stray file');
+    await fs.symlink(path.join(root, 'nowhere'), path.join(root, `${base}-2`));
+
+    await expect(resolveUniqueSnapshotName(root, base)).resolves.toBe(`${base}-3`);
+  });
+
   it('uses the base name when free', async () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
     await expect(resolveUniqueSnapshotName(root, '20260102T030405')).resolves.toBe(

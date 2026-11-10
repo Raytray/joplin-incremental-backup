@@ -170,7 +170,6 @@ export async function dedup(
   activeFiles: readonly string[],
   options: DedupOptions = {},
 ): Promise<DedupResult> {
-  const files = [...activeFiles];
   const index = buildContentIndex(previousManifest);
   const hashes = new Map<string, string>();
   const sizes = new Map<string, number>();
@@ -183,7 +182,7 @@ export async function dedup(
   let linkSupport: Promise<boolean> | null = null;
 
   const modes = await mapWithConcurrency(
-    files,
+    activeFiles,
     DEDUP_CONCURRENCY,
     async (relativePath): Promise<DeduplicationMode | 'failed' | null> => {
       const key = toManifestKey(relativePath);

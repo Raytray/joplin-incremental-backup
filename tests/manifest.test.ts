@@ -17,8 +17,17 @@ import {
   writeManifest,
 } from '../src/manifest';
 import type { ManifestMeta } from '../src/manifest';
+import { collectFilesRecursive } from '../src/platform';
 
 const SNAPSHOT = '/snapshots/20260101T000000';
+
+/** Every file under `dir`, with its size, as runBackup passes them. */
+async function listFiles(dir: string): Promise<Array<{ path: string; size: number }>> {
+  const files = await collectFilesRecursive(dir);
+  return Promise.all(
+    files.map(async (file) => ({ path: file, size: (await fs.stat(path.join(dir, file))).size })),
+  );
+}
 
 function sha256(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -61,7 +70,7 @@ describe('readManifest', () => {
 describe('writeManifest / readManifest', () => {
   it('round-trips a manifest', async () => {
     await fs.writeFile(path.join(SNAPSHOT, 'note.md'), 'hello');
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
 
     await writeManifest(SNAPSHOT, manifest);
 
@@ -75,7 +84,7 @@ describe('buildManifest', () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'hello');
     await fs.writeFile(path.join(SNAPSHOT, 'sub', 'b.txt'), 'world!');
 
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
 
     expect(manifest.fileCount).toBe(2);
     expect(manifest.files.map((file) => file.path)).toEqual(['a.txt', 'sub/b.txt']);
@@ -119,7 +128,7 @@ describe('buildManifest', () => {
 describe('isValidManifest', () => {
   it('accepts a complete manifest', async () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
     expect(isValidManifest(manifest)).toBe(true);
   });
 
@@ -131,13 +140,13 @@ describe('isValidManifest', () => {
 
   it('rejects a manifest with an invalid fingerprint', async () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
     expect(isValidManifest({ ...manifest, changeFingerprint: { noteCount: 1 } })).toBe(false);
   });
 
   it('accepts a legacy fingerprint without digests', async () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
     const { maxNoteUpdatedTime, noteCount, maxResourceUpdatedTime } = manifest.changeFingerprint;
     expect(
       isValidManifest({
@@ -149,7 +158,7 @@ describe('isValidManifest', () => {
 
   it('rejects a fingerprint whose digests have the wrong type', async () => {
     await fs.writeFile(path.join(SNAPSHOT, 'a.txt'), 'a');
-    const manifest = await buildManifest(SNAPSHOT, meta());
+    const manifest = await buildManifest(SNAPSHOT, meta(), await listFiles(SNAPSHOT));
     for (const bad of [{ noteTagDigest: 123 }, { folderDigest: null }, { noteDigest: ['x'] }]) {
       expect(
         isValidManifest({

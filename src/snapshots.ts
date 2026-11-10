@@ -3,8 +3,6 @@ import path from 'path';
 import type { Dirent } from 'fs';
 import { errorCode } from './platform';
 import { listSnapshots } from './retention';
-import { requireBackupPath } from './settings';
-import type { Settings } from './settings';
 
 export const LOCK_FILENAME = '.backup.lock';
 /**
@@ -19,20 +17,6 @@ export function resolveBackupRoot(backupPath: string, profileName?: string): str
   const base = backupPath.replace(/[/\\]+$/, '');
   if (!profileName || !profileName.trim()) return base;
   return path.join(base, profileName.trim());
-}
-
-/**
- * The backup root for this run: the explicit override (tests), otherwise the
- * configured directory. Throws a user-facing error when the directory is unset
- * or not absolute, so a bad setting can never resolve to a path in the
- * working directory. This is the only place that decision is made.
- */
-export function configuredBackupRoot(
-  settings: Settings,
-  options: { backupRoot?: string; profileName?: string },
-): string {
-  if (options.backupRoot !== undefined) return options.backupRoot;
-  return resolveBackupRoot(requireBackupPath(settings), options.profileName);
 }
 
 export function activeDirPath(backupRoot: string): string {
@@ -90,6 +74,20 @@ async function snapshotNameExists(backupRoot: string, snapshotName: string): Pro
 }
 
 /**
+ * Whether anything at all (file, directory, dangling symlink) has this name,
+ * so the new snapshot can be renamed into place without removing it first.
+ */
+async function nameTaken(backupRoot: string, name: string): Promise<boolean> {
+  try {
+    await fs.lstat(path.join(backupRoot, name));
+    return true;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+/**
  * Resolve a unique snapshot name, appending `-2`, `-3`, … when a snapshot of the
  * same second already exists so a rapid second run never clobbers the first.
  */
@@ -97,10 +95,10 @@ export async function resolveUniqueSnapshotName(
   backupRoot: string,
   baseName: string,
 ): Promise<string> {
-  if (!(await snapshotNameExists(backupRoot, baseName))) return baseName;
+  if (!(await nameTaken(backupRoot, baseName))) return baseName;
 
   let counter = SNAPSHOT_COLLISION_SUFFIX_START;
-  while (await snapshotNameExists(backupRoot, `${baseName}-${counter}`)) {
+  while (await nameTaken(backupRoot, `${baseName}-${counter}`)) {
     counter += 1;
   }
   return `${baseName}-${counter}`;

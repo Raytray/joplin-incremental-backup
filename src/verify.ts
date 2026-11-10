@@ -13,13 +13,8 @@ import {
 } from './platform';
 import { MANIFEST_FILENAME, readManifest } from './manifest';
 import { createVerifyLease } from './retention';
-import { getSettings } from './settings';
-import {
-  configuredBackupRoot,
-  LOCK_FILENAME,
-  resolveLastSnapshot,
-  snapshotDirPath,
-} from './snapshots';
+import { configuredBackupRoot, getSettings } from './settings';
+import { LOCK_FILENAME, resolveLastSnapshot, snapshotDirPath } from './snapshots';
 import type { BackupOptions } from './backup';
 
 const VERIFY_CONCURRENCY = 8;

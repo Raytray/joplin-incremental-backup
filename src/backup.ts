@@ -26,6 +26,7 @@ import { pruneSnapshots } from './retention';
 import {
   addInitializedBackupRoot,
   getLastBackup,
+  configuredBackupRoot,
   getSettings,
   isKnownBackupRoot,
   parseLastBackup,
@@ -50,7 +51,6 @@ import {
 } from './inventory';
 import {
   activeDirPath,
-  configuredBackupRoot,
   generateSnapshotName,
   LATEST_FILENAME,
   listStagingDirs,
@@ -712,7 +712,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     const manifest = await buildManifest(activeDir, meta, manifestEntries, dedupResult.hashes);
     await writeManifest(activeDir, manifest);
 
-    // resolveUniqueSnapshotName chose a name that doesn't exist yet.
+    // resolveUniqueSnapshotName chose a name nothing in the root has yet.
     await fs.rename(activeDir, snapshotDir);
     await atomicWriteFile(path.join(backupRoot, LATEST_FILENAME), snapshotName);
 
