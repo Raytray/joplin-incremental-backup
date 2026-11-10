@@ -2,8 +2,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import {
   atomicWriteFile,
-  collectEntries,
-  computeFileSha256,
+  collectFilesRecursive,
+  hashFile,
   mapWithConcurrency,
   toManifestKey,
 } from './platform';
@@ -160,7 +160,10 @@ export async function buildManifest(
           ? { path: toManifestKey(entry), size: undefined }
           : { path: toManifestKey(entry.path), size: entry.size },
       )
-    : await collectEntries(snapshotDir, snapshotDir);
+    : (await collectFilesRecursive(snapshotDir)).map((filePath) => ({
+        path: toManifestKey(filePath),
+        size: undefined,
+      }));
   const uniqueSortedEntries = [...new Map(entries.map((e) => [e.path, e])).values()].sort((a, b) =>
     a.path.localeCompare(b.path),
   );
@@ -171,8 +174,12 @@ export async function buildManifest(
     async ({ path: relativePath, size }): Promise<FileEntry> => {
       const absolutePath = path.join(snapshotDir, relativePath);
       const precomputed = precomputedHashes?.get(toManifestKey(relativePath));
-      const sha256 = precomputed ?? (await computeFileSha256(absolutePath, size));
-      return { path: relativePath, size: size ?? (await fs.stat(absolutePath)).size, sha256 };
+      if (precomputed !== undefined && size !== undefined) {
+        return { path: relativePath, size, sha256: precomputed };
+      }
+      // One read gives both the hash and the size.
+      const digest = await hashFile(absolutePath, size);
+      return { path: relativePath, size: digest.size, sha256: precomputed ?? digest.sha256 };
     },
   );
 

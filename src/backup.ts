@@ -9,7 +9,6 @@ import {
   LockError,
   assertDiskSpace,
   atomicWriteFile,
-  collectEntries,
   collectFilesRecursive,
   computeFileSha256,
   DEFAULT_MIN_FREE_BYTES,
@@ -238,9 +237,9 @@ export interface BackupOptions {
   /** Injectable clock for deterministic snapshot names. */
   now?: Date;
   /**
-   * Injectable SHA-256 implementation (defaults to the streaming one). The
-   * optional `sizeHint` lets the implementation pick a chunk size without an
-   * extra `stat` call.
+   * Injectable SHA-256 implementation for `verifyBackup` (used by tests;
+   * defaults to the streaming one). `sizeHint` is the size from the manifest.
+   * A backup run hashes with `hashFile`, which also gives the sizes.
    */
   computeHash?: (filePath: string, sizeHint?: number) => Promise<string>;
   /**
@@ -293,7 +292,6 @@ interface ResolvedContext {
   exportRetries: number;
   /** Undefined means use `assertDiskSpace`'s default threshold. */
   minFreeBytes?: number;
-  computeHash: (filePath: string, sizeHint?: number) => Promise<string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -515,16 +513,30 @@ async function readItemTimes(
  * Note↔tag links have no endpoint of their own, so they are read per tag
  * (`tags/:id/notes`), with bounded concurrency.
  */
+/** Like `Promise.all`, but waits for every promise to settle before rejecting. */
+async function allOrFirstError<T extends readonly unknown[]>(
+  promises: readonly [...{ [K in keyof T]: Promise<T[K]> }],
+): Promise<T> {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed) throw (failed as PromiseRejectedResult).reason;
+  return results.map((result) => (result as PromiseFulfilledResult<unknown>).value) as unknown as T;
+}
+
 export async function collectVaultInventory(
   options: VaultInventoryOptions = {},
 ): Promise<VaultInventory> {
   const { includeNoteTags = true } = options;
   const noteIds: string[] = [];
 
-  const notes = await readItemTimes('notes', (id) => noteIds.push(id));
-  const resources = await readItemTimes('resources');
-  const folders = await readItemTimes('folders');
-  const tags = await readItemTimes('tags');
+  // Independent Data API reads: fetch them together. allSettled, so a failed
+  // read does not leave the others paging while `retryTransient` starts over.
+  const [notes, resources, folders, tags] = await allOrFirstError([
+    readItemTimes('notes', (id) => noteIds.push(id)),
+    readItemTimes('resources'),
+    readItemTimes('folders'),
+    readItemTimes('tags'),
+  ]);
 
   let noteTagDigest: string | undefined;
   if (includeNoteTags) {
@@ -761,7 +773,6 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
     staleLockMs: options.staleLockMs ?? DEFAULT_STALE_LOCK_MS,
     exportRetries: options.exportRetries ?? DEFAULT_EXPORT_RETRIES,
     minFreeBytes: options.minFreeBytes,
-    computeHash: options.computeHash ?? computeFileSha256,
   };
 }
 
@@ -1093,17 +1104,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     }
 
     logger.info('Collecting exported files...');
-    const activeEntries = await collectEntries(exportDir, exportDir);
-    if (activeEntries.length === 0) {
+    // Paths only: hashing reads every byte anyway and gives the sizes, so a
+    // `stat` per file here would only add I/O on the backup drive.
+    const activeFiles = await collectFilesRecursive(exportDir);
+    if (activeFiles.length === 0) {
       throw new Error('Export produced no files; aborting backup.');
     }
-    const activeFiles = activeEntries.map((e) => e.path);
-    const fileSizes = new Map<string, number>(
-      activeEntries.map((e) => [toManifestKey(e.path), e.size]),
-    );
-    logger.info(
-      `Exported ${activeFiles.length} file(s) (${formatBytes(activeEntries.reduce((s, e) => s + e.size, 0))}).`,
-    );
+    logger.info(`Exported ${activeFiles.length} file(s).`);
 
     // Joplin's RAW exporter silently skips items it cannot handle (still-encrypted
     // notes, resources of trashed notes, …) while still reporting success. Compare
@@ -1126,7 +1133,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       ...stagingWarnings,
     ];
 
-    const dedupOptions = { computeHash: context.computeHash, fileSizes };
+    const dedupOptions = {};
     let dedupResult: DedupResult;
     if (localDir) {
       logger.info('Writing new and changed files to the backup drive...');
@@ -1148,6 +1155,9 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         dedupOptions,
       );
     }
+
+    const exportedBytes = [...dedupResult.sizes.values()].reduce((sum, size) => sum + size, 0);
+    logger.info(`Hashed ${activeFiles.length} file(s) (${formatBytes(exportedBytes)}).`);
 
     // Semantic change summary relative to the previous snapshot.
     const previousFiles = lastManifest?.files ?? [];
@@ -1190,7 +1200,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       createdAt: Date.now(),
       deduplication: getDeduplicationMode(dedupResult),
     };
-    const manifest = await buildManifest(activeDir, meta, activeEntries, dedupResult.hashes);
+    const manifestEntries = activeFiles.map((filePath) => {
+      const size = dedupResult.sizes.get(toManifestKey(filePath));
+      // Every exported file was hashed, so this is a bug, not a runtime state.
+      if (size === undefined) throw new Error(`No size was recorded for ${filePath}.`);
+      return { path: filePath, size };
+    });
+    const manifest = await buildManifest(activeDir, meta, manifestEntries, dedupResult.hashes);
     await writeManifest(activeDir, manifest);
 
     await safeRmDir(snapshotDir);

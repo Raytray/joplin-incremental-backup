@@ -17,6 +17,7 @@ import {
   collectFilesRecursive,
   computeFileSha256,
   ensureBackupRoot,
+  hashFile,
   isHardlinkUnsupportedError,
   hasFreshLock,
   mapWithConcurrency,
@@ -30,7 +31,7 @@ import { logger } from '../src/logger';
 
 const ROOT = '/data';
 
-function sha256(content: string): string {
+function sha256(content: string | Buffer): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
@@ -190,6 +191,84 @@ describe('computeFileSha256', () => {
     await fs.writeFile(filePath, content);
 
     await expect(computeFileSha256(filePath)).resolves.toBe(sha256(content));
+  });
+});
+
+describe('hashFile', () => {
+  it.each([
+    ['empty', 0],
+    ['small', 5],
+    ['exactly one small chunk', 64 * 1024],
+    ['one byte over a small chunk', 64 * 1024 + 1],
+    ['several large chunks', 3 * 1024 * 1024 + 17],
+  ])('returns the digest and size of a %s file', async (_label, size) => {
+    const filePath = path.join(ROOT, `f${size}.bin`);
+    const content = Buffer.alloc(size, 'x');
+    await fs.writeFile(filePath, content);
+
+    await expect(hashFile(filePath)).resolves.toEqual({ sha256: sha256(content), size });
+    await expect(hashFile(filePath, size)).resolves.toEqual({ sha256: sha256(content), size });
+  });
+
+  it('moves to 1 MB reads past 64 KB even when reads come back short', async () => {
+    const filePath = path.join(ROOT, 'short-reads.bin');
+    const content = Buffer.alloc(300 * 1024, 'z');
+    await fs.writeFile(filePath, content);
+    const requested: number[] = [];
+    const open = fs.open.bind(fs);
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.open>
+    ) => {
+      const handle = await open(...args);
+      const read = handle.read.bind(handle) as (
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: number,
+      ) => Promise<{ bytesRead: number; buffer: Buffer }>;
+      // A network filesystem returning at most 48 KB per read.
+      return Object.assign(handle, {
+        read: (buffer: Buffer, offset: number, length: number, position: number) => {
+          requested.push(length);
+          return read(buffer, offset, Math.min(length, 48 * 1024), position);
+        },
+      });
+    }) as typeof fs.open);
+    let digest: Awaited<ReturnType<typeof hashFile>>;
+    try {
+      digest = await hashFile(filePath);
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(digest).toEqual({ sha256: sha256(content), size: content.length });
+    expect(requested.slice(0, 3)).toEqual([64 * 1024, 64 * 1024, 1024 * 1024]);
+  });
+
+  it('does not stat the file', async () => {
+    const filePath = path.join(ROOT, 'nostat.bin');
+    await fs.writeFile(filePath, Buffer.alloc(100 * 1024, 'y'));
+    const stat = vi.spyOn(fs, 'stat');
+    const open = fs.open.bind(fs);
+    let handleStat: ReturnType<typeof vi.fn> | undefined;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.open>
+    ) => {
+      const handle = await open(...args);
+      handleStat = vi.fn(handle.stat.bind(handle));
+      return Object.assign(handle, { stat: handleStat });
+    }) as typeof fs.open);
+    let statCalls: number;
+    try {
+      await hashFile(filePath);
+    } finally {
+      // Read the calls first: mockRestore clears them.
+      statCalls = stat.mock.calls.length;
+      stat.mockRestore();
+      openSpy.mockRestore();
+    }
+    expect(statCalls).toBe(0);
+    expect(handleStat).not.toHaveBeenCalled();
   });
 });
 
