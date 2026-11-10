@@ -1235,6 +1235,77 @@ describe('verifyBackup', () => {
     expect(result).toMatchObject({ ok: false, snapshotName: null });
   });
 
+  it('warns about files the manifest does not list, without failing', async () => {
+    const first = await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+    await fs.writeFile(path.join(snapshotDir, 'stray.md'), 'not in the manifest');
+    await fs.mkdir(path.join(snapshotDir, 'resources'), { recursive: true });
+    await fs.writeFile(path.join(snapshotDir, 'resources', 'extra'), 'x');
+
+    const result = await verifyBackup({ backupRoot: root });
+
+    expect(result).toMatchObject({ ok: true, extraFiles: ['resources/extra', 'stray.md'] });
+    expect(result.message).toMatch(/^Verified 1 files/);
+    expect(result.message).toContain(
+      '2 file(s) in the snapshot are not listed in its manifest:\nresources/extra\nstray.md',
+    );
+  });
+
+  it('lists at most 10 extra files by name', async () => {
+    const first = await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+    for (let i = 0; i < 12; i++) {
+      await fs.writeFile(path.join(snapshotDir, `stray${String(i).padStart(2, '0')}.md`), 'x');
+    }
+
+    const result = await verifyBackup({ backupRoot: root });
+
+    expect(result.extraFiles).toHaveLength(12);
+    expect(result.message).toContain('stray09.md\n… and 2 more');
+    expect(result.message).not.toContain('stray10.md');
+  });
+
+  it('does not count the manifest as an extra file', async () => {
+    await run();
+    const result = await verifyBackup({ backupRoot: path.join(BACKUP_ROOT, PROFILE) });
+    expect(result.extraFiles).toEqual([]);
+    expect(result.message).not.toMatch(/Warning/);
+  });
+
+  it('reports an interrupted verification, not a failure, when a backup prunes the snapshot meanwhile', async () => {
+    const first = await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    const snapshotDir = snapshotDirPath(root, first.snapshotName!);
+
+    // While the file is being hashed, a backup commits a newer snapshot and
+    // prunes this one (retention 1).
+    const result = await verifyBackup({
+      backupRoot: root,
+      computeHash: async () => {
+        await fs.writeFile(path.join(root, LATEST_FILENAME), '20991231T000000');
+        await fs.rm(snapshotDir, { recursive: true, force: true });
+        return 'gone';
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, interrupted: true, extraFiles: [] });
+    expect(result.message).toMatch(/A backup ran while .* was being verified/);
+    expect(result.message).not.toMatch(/Verification failed/);
+  });
+
+  it('still fails for a corrupted file when no backup ran meanwhile', async () => {
+    const first = await run();
+    const root = path.join(BACKUP_ROOT, PROFILE);
+    await fs.writeFile(path.join(snapshotDirPath(root, first.snapshotName!), 'n1.md'), 'tampered');
+
+    const result = await verifyBackup({ backupRoot: root });
+
+    expect(result.interrupted).toBeUndefined();
+    expect(result.message).toMatch(/Verification failed/);
+  });
+
   it('reports when the manifest is missing', async () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
     const first = await run();

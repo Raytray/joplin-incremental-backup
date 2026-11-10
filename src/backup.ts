@@ -20,7 +20,13 @@ import {
   toManifestKey,
   touchLock,
 } from './platform';
-import { buildManifest, FINGERPRINT_DIGEST_KEYS, readManifest, writeManifest } from './manifest';
+import {
+  buildManifest,
+  FINGERPRINT_DIGEST_KEYS,
+  MANIFEST_FILENAME,
+  readManifest,
+  writeManifest,
+} from './manifest';
 import type { ChangeFingerprint, DeduplicationMode, Manifest, ManifestMeta } from './manifest';
 import { dedup, getDeduplicationMode, stageFromLocal } from './dedup';
 import type { DedupResult } from './dedup';
@@ -257,8 +263,21 @@ export interface VerifyResult {
   total: number;
   matched: number;
   mismatches: string[];
+  /**
+   * Files in the snapshot that its manifest does not list (besides the
+   * manifest itself). Reported as a warning: they don't make it fail.
+   */
+  extraFiles: string[];
+  /**
+   * A backup finished while verifying, and it may have pruned or replaced the
+   * snapshot, so the mismatches prove nothing. `ok` is false: verify again.
+   */
+  interrupted?: boolean;
   message: string;
 }
+
+/** How many extra file paths the verify message lists by name. */
+const EXTRA_FILES_SHOWN = 10;
 
 interface ResolvedContext {
   settings: Settings;
@@ -1279,6 +1298,10 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   const backupRoot = configuredBackupRoot(settings, options);
   const computeHash = options.computeHash ?? computeFileSha256;
 
+  // Verify doesn't take the backup lock: hashing a whole snapshot can take
+  // minutes, and holding the lock that long would make scheduled backups fail.
+  // A backup that runs meanwhile is detected afterwards instead (below).
+  const latestBefore = await readLatestSnapshotName(backupRoot);
   const snapshotName = await resolveLastSnapshot(backupRoot, settings.lastSnapshot || undefined);
 
   if (!snapshotName) {
@@ -1289,6 +1312,7 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
       total: 0,
       matched: 0,
       mismatches: [],
+      extraFiles: [],
       message: 'No snapshot found to verify.',
     };
   }
@@ -1303,6 +1327,7 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
       total: 0,
       matched: 0,
       mismatches: [],
+      extraFiles: [],
       message: `No valid manifest found in ${snapshotName}.`,
     };
   }
@@ -1329,19 +1354,54 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
   const mismatches = results.filter((result) => !result.ok).map((result) => result.path);
   const total = manifest.files.length;
   const matched = total - mismatches.length;
-  const ok = mismatches.length === 0 && matched === total && total > 0;
+  const base = { snapshotName, snapshotDir, total, matched, mismatches };
 
-  return {
-    ok,
-    snapshotName,
-    snapshotDir,
-    total,
-    matched,
-    mismatches,
-    message: ok
-      ? `Verified ${total} files in ${snapshotName}.`
-      : `Verification failed in ${snapshotName}: ${mismatches.length} of ${total} files mismatch.`,
-  };
+  // A backup that finished meanwhile writes `latest.txt` before it prunes, so
+  // a changed `latest.txt` (or a vanished snapshot) means files may have been
+  // removed under us.
+  const interrupted = async () =>
+    (await readLatestSnapshotName(backupRoot)) !== latestBefore ||
+    !(await snapshotNameExists(backupRoot, snapshotName));
+  const interruptedResult = (): VerifyResult => ({
+    ...base,
+    ok: false,
+    extraFiles: [],
+    interrupted: true,
+    message:
+      `A backup ran while ${snapshotName} was being verified and may have removed it. ` +
+      'Run the verification again.',
+  });
+
+  if (mismatches.length > 0 && (await interrupted())) return interruptedResult();
+
+  let extraFiles: string[];
+  try {
+    const listed = new Set(manifest.files.map((file) => file.path));
+    listed.add(MANIFEST_FILENAME);
+    extraFiles = (await collectEntries(snapshotDir, snapshotDir))
+      .map((entry) => entry.path)
+      .filter((filePath) => !listed.has(filePath))
+      .sort();
+  } catch (error) {
+    // The snapshot was pruned while it was being listed.
+    if (errorCode(error) === 'ENOENT' && (await interrupted())) return interruptedResult();
+    throw error;
+  }
+
+  const ok = mismatches.length === 0 && total > 0;
+  let message = ok
+    ? `Verified ${total} files in ${snapshotName}.`
+    : `Verification failed in ${snapshotName}: ${mismatches.length} of ${total} files mismatch.`;
+  if (extraFiles.length > 0) {
+    const shown = extraFiles.slice(0, EXTRA_FILES_SHOWN);
+    const more = extraFiles.length - shown.length;
+    message +=
+      `\n\nWarning: ${extraFiles.length} file(s) in the snapshot are not listed in its ` +
+      `manifest:\n${shown.join('\n')}` +
+      (more > 0 ? `\n… and ${more} more` : '');
+  }
+
+  return { ...base, ok, extraFiles, message };
 }
 
 /**
