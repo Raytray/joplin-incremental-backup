@@ -2,12 +2,15 @@
   "compilerOptions": {
     "outDir": "./dist/",
     "module": "commonjs",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "target": "es2018",
     "lib": ["es2018"],
     "jsx": "react",
     "allowJs": true,
-    "baseUrl": ".",
+    "paths": {
+      "api": ["./api"],
+      "api/*": ["./api/*"]
+    },
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
