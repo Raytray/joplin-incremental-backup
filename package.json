@@ -13,8 +13,10 @@
     "lint": "oxlint src tests e2e",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "updateVersion": "webpack --env joplin-plugin-config=updateVersion",
-    "update": "npm install -g generator-joplin && yo joplin --node-package-manager npm --update --force"
+    "updateVersion": "webpack --env joplin-plugin-config=updateVersion"
+  },
+  "engines": {
+    "node": ">=22.12"
   },
   "license": "MIT",
   "keywords": [

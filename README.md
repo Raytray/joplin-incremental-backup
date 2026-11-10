@@ -114,10 +114,14 @@ This makes the backups a safe, vendor-independent archive: even without the plug
 
 ## Building from source
 
+Needs Node.js 22.12 or later.
+
 ```bash
 npm install
 npm run dist     # builds the plugin into publish/
 ```
+
+The project started from the `generator-joplin` scaffold, but don't refresh it with the generator: its template pins older dev dependencies and would overwrite `tsconfig.json`. Update dependencies directly with npm.
 
 Other scripts:
 
