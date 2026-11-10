@@ -74,10 +74,22 @@ export async function atomicWriteFile(targetPath: string, content: string): Prom
   }
 }
 
-function createLockError(lockPath: string): NodeJS.ErrnoException {
-  const error = new Error(`A backup is already in progress (lock: ${lockPath}).`);
-  (error as NodeJS.ErrnoException).code = 'EEXIST';
-  return error;
+/**
+ * Thrown by `acquireLock` when another backup holds the lock. Callers tell
+ * contention apart from real failures by this class, not by its `EEXIST`
+ * code: filesystem errors during a run can carry `EEXIST` too.
+ */
+export class LockError extends Error {
+  readonly code = 'EEXIST';
+
+  constructor(lockPath: string) {
+    super(`A backup is already in progress (lock: ${lockPath}).`);
+    this.name = 'LockError';
+  }
+}
+
+function createLockError(lockPath: string): LockError {
+  return new LockError(lockPath);
 }
 
 /**

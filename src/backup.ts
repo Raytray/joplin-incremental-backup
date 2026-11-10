@@ -6,6 +6,7 @@ import joplin from 'api';
 import { logger } from './logger';
 import {
   acquireLock,
+  LockError,
   assertDiskSpace,
   atomicWriteFile,
   collectEntries,
@@ -248,6 +249,13 @@ export interface BackupOptions {
    * Defaults to `staging/` under the plugin's data directory.
    */
   localStagingRoot?: string;
+  /**
+   * Leave out the "Backup started…" and "Backup failed" toasts (default
+   * `false`). The scheduler sets it on retries after a failure, so an
+   * unplugged drive does not raise a toast on every retry. Failures are still
+   * logged and recorded as the last backup result, and a success still toasts.
+   */
+  quiet?: boolean;
 }
 
 export interface VerifyResult {
@@ -831,18 +839,25 @@ export async function prepareBackupRoot(
  * Log, toast and persist a failed run so "Show last backup result" reflects
  * it. Persistence errors are swallowed: they must never mask the original.
  */
-async function recordFailure(startTime: number, finishedAt: Date, error: unknown): Promise<void> {
+async function recordFailure(
+  startTime: number,
+  finishedAt: Date,
+  error: unknown,
+  notify: boolean,
+): Promise<void> {
   const durationMs = Date.now() - startTime;
   const duration = `${(durationMs / 1000).toFixed(1)}s`;
   const message = error instanceof Error ? error.message : String(error);
   logger.error('Backup failed.', error);
-  void joplin.views.dialogs
-    .showToast({
-      message: `Backup failed after ${duration}.`,
-      type: ToastType.Error,
-      duration: 6000,
-    })
-    .catch(() => undefined);
+  if (notify) {
+    void joplin.views.dialogs
+      .showToast({
+        message: `Backup failed after ${duration}.`,
+        type: ToastType.Error,
+        duration: 6000,
+      })
+      .catch(() => undefined);
+  }
   const finishedIso = finishedAt.toISOString();
   try {
     const record = JSON.stringify({
@@ -910,12 +925,21 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     // Setup failures (no/invalid directory, low disk space) are recorded like
     // any other failed run. Lock contention below is not: it means another
     // run is in progress and will record its own result.
-    await recordFailure(startTime, options.now ?? new Date(), error);
+    await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
     throw error;
   }
   const { settings, backupRoot, lockPath, activeDir } = context;
 
-  await acquireLock(lockPath, context.staleLockMs);
+  try {
+    await acquireLock(lockPath, context.staleLockMs);
+  } catch (error) {
+    // Contention is not a failure: the run holding the lock records its own
+    // result. Anything else (e.g. a read-only drive) is.
+    if (!(error instanceof LockError)) {
+      await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
+    }
+    throw error;
+  }
   const heartbeat = startLockHeartbeat(lockPath, context.staleLockMs);
   /** Local directory the export goes to, when staging locally. */
   let localDir: string | null = null;
@@ -925,9 +949,11 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     if (supersededBy !== null) return supersededResult(supersededBy);
 
     logger.info('Starting backup run...');
-    void joplin.views.dialogs
-      .showToast({ message: 'Backup started…', type: ToastType.Info })
-      .catch(() => undefined);
+    if (!options.quiet) {
+      void joplin.views.dialogs
+        .showToast({ message: 'Backup started…', type: ToastType.Info })
+        .catch(() => undefined);
+    }
 
     const lastSnapshotName = await resolveLastSnapshot(
       backupRoot,
@@ -1246,7 +1272,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
 
     return result;
   } catch (error) {
-    await recordFailure(startTime, options.now ?? new Date(), error);
+    await recordFailure(startTime, options.now ?? new Date(), error, !options.quiet);
     throw error;
   } finally {
     heartbeat.stop();

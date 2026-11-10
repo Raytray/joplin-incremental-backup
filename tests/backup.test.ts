@@ -430,6 +430,15 @@ describe('unset backup directory', () => {
     expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
     expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
   });
+
+  it('records the failure without a toast when quiet', async () => {
+    vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    await expect(runBackup({ quiet: true })).rejects.toThrow(MISSING_BACKUP_PATH_MESSAGE);
+
+    const record = JSON.parse(String(mockState.values[SETTING_KEYS.lastBackupResultJson]));
+    expect(record).toMatchObject({ status: 'failed', error: MISSING_BACKUP_PATH_MESSAGE });
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(false);
+  });
 });
 
 describe('relative backup directory', () => {
@@ -1095,6 +1104,38 @@ describe('runBackup — failures', () => {
     const root = path.join(BACKUP_ROOT, PROFILE);
     expect(await listStagingDirs(root)).toEqual([]);
     await expect(fs.stat(path.join(root, LOCK_FILENAME))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('shows neither the start nor the failure toast when quiet', async () => {
+    stubExport([]);
+
+    await expect(run({ quiet: true })).rejects.toThrow(/no files/);
+
+    expect(mockState.toastMessages).toEqual([]);
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(/failed/);
+  });
+
+  it('records a lock file that cannot be created (e.g. read-only drive) as a failure', async () => {
+    const realOpen = fs.open.bind(fs);
+    const open = vi.spyOn(fs, 'open').mockImplementation((async (
+      file: Parameters<typeof fs.open>[0],
+      flags?: Parameters<typeof fs.open>[1],
+    ) => {
+      if (String(file).endsWith(LOCK_FILENAME) && flags === 'wx') {
+        throw Object.assign(new Error('read-only file system'), { code: 'EROFS' });
+      }
+      return realOpen(file, flags);
+    }) as typeof fs.open);
+    try {
+      await expect(run()).rejects.toMatchObject({ code: 'EROFS' });
+    } finally {
+      open.mockRestore();
+    }
+
+    expect(String(mockState.values[SETTING_KEYS.lastBackupResult])).toMatch(
+      /failed — .*read-only file system/,
+    );
+    expect(mockState.toastMessages.some((message) => /Backup failed/.test(message))).toBe(true);
   });
 
   it('fails immediately when the lock is already held', async () => {

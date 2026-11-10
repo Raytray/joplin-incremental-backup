@@ -10,7 +10,7 @@ import {
   SETTING_KEYS,
 } from './settings';
 import type { Settings } from './settings';
-import { errorCode } from './platform';
+import { LockError } from './platform';
 import { listSnapshots } from './retention';
 
 export { parseLastBackup } from './settings';
@@ -27,14 +27,35 @@ export const CATCH_UP_OVERDUE_FACTOR = 2;
 /** Grace period before a startup catch-up export, so Joplin can finish loading. */
 export const CATCH_UP_GRACE_MS = 5 * 1000;
 
-/** Re-arm delay after a failed run — much sooner than a full interval. */
+/**
+ * Re-arm delay after a run that could not start because another backup was in
+ * progress, and after the first failure in a row.
+ */
 export const RETRY_DELAY_MS = 5 * 60 * 1000;
+
+/**
+ * Re-arm delays after the 1st, 2nd, 3rd… failure in a row. Once these run out,
+ * retries fall back to the regular interval. No delay is ever longer than the
+ * interval, and a successful run (or a settings change) starts over.
+ */
+export const FAILURE_BACKOFF_MS: readonly number[] = [
+  RETRY_DELAY_MS,
+  15 * 60 * 1000,
+  60 * 60 * 1000,
+];
 
 /**
  * Node's `setTimeout` fires *immediately* for delays above 2³¹−1 ms, so long
  * delays are split into chunks of at most this value and re-armed.
  */
 export const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/** How a scheduled run ended. */
+type RunOutcome =
+  | { kind: 'ok'; result: BackupResult }
+  /** Another run was in flight, here or in another Joplin instance. */
+  | { kind: 'busy' }
+  | { kind: 'failed' };
 
 /** Runs one scheduled backup; injected in tests. */
 export type BackupRunner = (options?: BackupOptions) => Promise<BackupResult>;
@@ -91,6 +112,11 @@ export class Scheduler {
    * `undefined` means it could not be read, so no run is skipped.
    */
   private observedLastBackup: number | undefined;
+  /**
+   * Scheduled runs that have failed in a row. Drives the retry backoff, and
+   * runs after the first failure are quiet (no start or failure toast).
+   */
+  private consecutiveFailures = 0;
 
   private readonly runBackup: BackupRunner;
   private readonly setTimeoutFn: NonNullable<SchedulerDependencies['setTimeoutFn']>;
@@ -162,6 +188,8 @@ export class Scheduler {
   ): void {
     this.stop();
     this.observedLastBackup = parseLastBackup(observedLastBackupIso) ?? Number.NEGATIVE_INFINITY;
+    // New settings may have fixed the problem: if not, say so again.
+    this.consecutiveFailures = 0;
 
     if (!isSchedulerEnabled(intervalHours)) {
       this.intervalMs = 0;
@@ -206,26 +234,46 @@ export class Scheduler {
     this.armAt(lastBackupMs + this.intervalMs);
   }
 
-  /** Run a backup, skipping if one is already in flight. */
+  /** Run a backup, skipping if one is already in flight. `null` unless it succeeded. */
   async executeScheduledBackup(options?: BackupOptions): Promise<BackupResult | null> {
+    const outcome = await this.attempt(options);
+    return outcome.kind === 'ok' ? outcome.result : null;
+  }
+
+  /**
+   * Run a backup, quietly if the previous scheduled runs failed (unless the
+   * caller says otherwise). Leaves `consecutiveFailures` to `tick`, which
+   * knows whether the run still belongs to the current schedule.
+   */
+  private async attempt(options?: BackupOptions): Promise<RunOutcome> {
     if (this.running) {
       logger.warn('Scheduled backup already in progress; skipping this tick.');
-      return null;
+      return { kind: 'busy' };
     }
 
     this.running = true;
     try {
-      return await this.runBackup(options);
+      const result = await this.runBackup({
+        ...options,
+        quiet: options?.quiet ?? this.consecutiveFailures > 0,
+      });
+      return { kind: 'ok', result };
     } catch (error) {
-      if (errorCode(error) === 'EEXIST') {
+      if (error instanceof LockError) {
         logger.warn('Another backup holds the lock; skipping this scheduled run.');
-      } else {
-        logger.error('Scheduled backup failed.', error);
+        return { kind: 'busy' };
       }
-      return null;
+      logger.error('Scheduled backup failed.', error);
+      return { kind: 'failed' };
     } finally {
       this.running = false;
     }
+  }
+
+  /** Re-arm delay after the current run of consecutive failures. */
+  private failureRetryDelay(): number {
+    const delay = FAILURE_BACKOFF_MS[this.consecutiveFailures - 1] ?? this.intervalMs;
+    return Math.min(delay, this.intervalMs);
   }
 
   /**
@@ -252,6 +300,8 @@ export class Scheduler {
     const latest = await this.readLastBackup();
     if (generation !== this.generation) return;
     if (observed !== undefined && latest !== undefined && latest > observed) {
+      // A backup succeeded, so the failure streak is over.
+      this.consecutiveFailures = 0;
       this.observedLastBackup = latest;
       this.armAt(latest + this.intervalMs);
       return;
@@ -259,13 +309,16 @@ export class Scheduler {
 
     // Repeat the check once the lock is held: a backup that was running when
     // this timer fired may finish while this one waits to start.
-    const result = await this.executeScheduledBackup(
+    const outcome = await this.attempt(
       observed === undefined ? undefined : { skipIfBackedUpAfter: observed },
     );
 
     // The settings changed while the backup ran: whoever changed them has
-    // already re-armed (or paused) the schedule.
+    // already re-armed (or paused) the schedule and reset the failure count.
     if (generation !== this.generation) return;
+
+    if (outcome.kind === 'ok') this.consecutiveFailures = 0;
+    if (outcome.kind === 'failed') this.consecutiveFailures += 1;
 
     // This run (or the one that superseded it) moved `lastBackup`; take the
     // new value as the baseline so the next tick does not mistake it for
@@ -273,12 +326,23 @@ export class Scheduler {
     this.observedLastBackup = await this.readLastBackup();
     if (generation !== this.generation) return;
 
-    if (result === null) {
-      // The run failed (or was skipped because another one was in flight).
-      // Retry much sooner than a full interval would.
+    if (outcome.kind === 'busy') {
       this.armAt(this.now() + RETRY_DELAY_MS);
       return;
     }
+
+    if (outcome.kind === 'failed') {
+      // Retry sooner than a full interval would, backing off while failures repeat.
+      const delay = this.failureRetryDelay();
+      logger.warn(
+        `${this.consecutiveFailures} scheduled backup(s) failed in a row; ` +
+          `retrying in ${formatDuration(delay)}.`,
+      );
+      this.armAt(this.now() + delay);
+      return;
+    }
+
+    const { result } = outcome;
 
     if (result.supersededBy !== undefined) {
       this.armAt(result.supersededBy + this.intervalMs);

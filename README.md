@@ -85,7 +85,7 @@ When Joplin starts, the plugin checks when the last successful backup finished:
 
 If strict 24 h spacing matters more than avoiding an export at launch, this is a one-line change in `src/scheduler.ts` (replace the "next interval boundary" branch with `now + intervalMs`).
 
-After a successful backup, the next one is scheduled exactly one interval later. After a failed backup, the next attempt is scheduled after 5 minutes rather than waiting a full interval.
+After a successful backup, the next one is scheduled exactly one interval later. After a failed backup, the next attempt is scheduled sooner than a full interval, backing off while failures repeat: 5 minutes, then 15 minutes, then 1 hour, then the regular interval (never longer than the interval). Retries after a failure run quietly: only the first failure in a row shows toasts, and later ones are logged and recorded in **Show last backup result**. A successful backup (including a manual one) or a change to the backup directory or interval starts over. If another backup is already running, the scheduled one is retried after 5 minutes and does not count as a failure.
 
 ### Encrypted items
 
