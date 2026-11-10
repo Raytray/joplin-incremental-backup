@@ -828,7 +828,7 @@ export async function prepareBackupRoot(
 
 /**
  * Log, toast and persist a failed run so "Show last backup result" reflects
- * it. Persistence errors are swallowed: they must never mask the original.
+ * it.
  */
 async function recordFailure(startTime: number, finishedAt: Date, error: unknown): Promise<void> {
   const durationMs = Date.now() - startTime;
@@ -843,17 +843,14 @@ async function recordFailure(startTime: number, finishedAt: Date, error: unknown
     })
     .catch(() => undefined);
   const finishedIso = finishedAt.toISOString();
-  try {
-    await persistResult(`${finishedIso} — failed — ${duration} — ${message}`, {
-      status: 'failed',
-      startedAt: new Date(startTime).toISOString(),
-      finishedAt: finishedIso,
-      durationMs,
-      error: message,
-    });
-  } catch {
-    // Persistence must never mask the original error.
-  }
+  // persistResult never throws, so it cannot mask the original error.
+  await persistResult(`${finishedIso} — failed — ${duration} — ${message}`, {
+    status: 'failed',
+    startedAt: new Date(startTime).toISOString(),
+    finishedAt: finishedIso,
+    durationMs,
+    error: message,
+  });
 }
 
 /**

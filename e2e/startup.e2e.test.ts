@@ -230,6 +230,7 @@ describe('startup behaviour in a real Joplin', () => {
     // still restore it. Once retention prunes the older snapshots it is in no
     // backup. A fix that backs up the trash should update these assertions.
     expect(changes?.deleted).toEqual([`${ids.trashedNote}.md`]);
+    expect(changes?.deletedCount).toBe(1);
     expect(await exists(path.join(backupDir, second, `${ids.trashedNote}.md`))).toBe(false);
     expect(await read(first, ids.trashedNote)).toContain('Goes.');
 

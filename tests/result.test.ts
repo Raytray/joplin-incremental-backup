@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import joplin from '../src/__mocks__/joplin';
+import { logger } from '../src/logger';
 import {
   formatLastBackupResult,
   persistResult,
@@ -67,6 +69,60 @@ describe('persistResult', () => {
   });
 });
 
+describe('persistResult when a settings write fails', () => {
+  const failed = {
+    status: 'failed' as const,
+    startedAt: '2026-01-01T00:00:00.000Z',
+    finishedAt: '2026-01-01T00:00:01.000Z',
+    durationMs: 1000,
+    error: 'boom',
+  };
+
+  it('does not throw, and leaves no previous details next to the new summary', async () => {
+    mockState.values[SETTING_KEYS.lastBackupResult] = 'old summary';
+    mockState.values[SETTING_KEYS.lastBackupResultJson] = '{"status":"success","changes":{}}';
+    const realSetValue = joplin.settings.setValue.bind(joplin.settings);
+    let jsonWrites = 0;
+    const setValue = vi
+      .spyOn(joplin.settings, 'setValue')
+      .mockImplementation(async (key: string, value: unknown) => {
+        // The clear goes through; writing the new record fails.
+        if (key === SETTING_KEYS.lastBackupResultJson && ++jsonWrites === 2) {
+          throw new Error('settings DB error');
+        }
+        return realSetValue(key, value);
+      });
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(persistResult('new summary', failed)).resolves.toBeUndefined();
+    } finally {
+      setValue.mockRestore();
+    }
+
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBe('new summary');
+    expect(mockState.values[SETTING_KEYS.lastBackupResultJson]).toBe('');
+    expect(warn).toHaveBeenCalledWith('Could not record the backup result.', expect.any(Error));
+    warn.mockRestore();
+  });
+
+  it('keeps the previous summary and record together when the first write fails', async () => {
+    mockState.values[SETTING_KEYS.lastBackupResult] = 'old summary';
+    mockState.values[SETTING_KEYS.lastBackupResultJson] = '{"old":true}';
+    const setValue = vi
+      .spyOn(joplin.settings, 'setValue')
+      .mockRejectedValue(new Error('settings DB error'));
+    vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    try {
+      await persistResult('new summary', failed);
+    } finally {
+      setValue.mockRestore();
+    }
+
+    expect(mockState.values[SETTING_KEYS.lastBackupResult]).toBe('old summary');
+    expect(mockState.values[SETTING_KEYS.lastBackupResultJson]).toBe('{"old":true}');
+  });
+});
+
 describe('formatLastBackupResult', () => {
   it('says so when nothing was recorded', () => {
     expect(formatLastBackupResult('', '')).toBe('No backup run has been recorded yet.');
@@ -114,6 +170,13 @@ describe('formatLastBackupResult', () => {
     expect(message).toContain('Deleted:\nd.md');
     expect(message).toContain('Warnings:\none warning');
     expect(message).not.toContain('more\n\nWarnings');
+  });
+
+  it('caps the warnings of a record written before counts were stored', () => {
+    const json = JSON.stringify({ status: 'success', warnings: paths('w', 3000) });
+    expect(formatLastBackupResult('summary', json)).toBe(
+      `summary\n\nWarnings:\n${paths('w', 20).join('\n')}\n… and 2980 more`,
+    );
   });
 
   it('adds nothing for a failed run beyond its duration', () => {

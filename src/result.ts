@@ -1,3 +1,4 @@
+import { logger } from './logger';
 import { setLastBackupResult, setLastBackupResultJson } from './settings';
 import type { BackupChanges } from './backup';
 
@@ -26,19 +27,21 @@ interface RecordTimes {
   durationMs: number;
 }
 
+export type FailedRecord = RecordTimes & { status: 'failed'; error: string };
+
+export type CompletedRecord = RecordTimes & {
+  status: 'skipped' | 'success';
+  snapshotName?: string;
+  fileCount?: number;
+  changes: RecordedChanges;
+  /** The first warnings; `warningCount` is the total. */
+  warnings: string[];
+  warningCount: number;
+  message: string;
+};
+
 /** The run record stored in the `lastBackupResultJson` setting. */
-export type BackupRecord =
-  | (RecordTimes & { status: 'failed'; error: string })
-  | (RecordTimes & {
-      status: 'skipped' | 'success';
-      snapshotName?: string;
-      fileCount?: number;
-      changes: RecordedChanges;
-      /** The first warnings; `warningCount` is the total. */
-      warnings: string[];
-      warningCount: number;
-      message: string;
-    });
+export type BackupRecord = FailedRecord | CompletedRecord;
 
 export function recordChanges(changes: BackupChanges): RecordedChanges {
   return {
@@ -60,10 +63,22 @@ export function recordWarnings(warnings: readonly string[]): {
   return { warnings: warnings.slice(0, RECORDED_LIST_LIMIT), warningCount: warnings.length };
 }
 
-/** Store a run's one-line summary and its record for "Show last backup result". */
+/**
+ * Store a run's one-line summary and its record for "Show last backup result".
+ *
+ * Never throws: by the time a result is recorded the run is over (a success
+ * has already committed its snapshot), and a settings write failure must not
+ * turn it into a failure. The old record is cleared first, so a write that
+ * fails midway never pairs the new summary with the previous run's details.
+ */
 export async function persistResult(summary: string, record: BackupRecord): Promise<void> {
-  await setLastBackupResult(summary);
-  await setLastBackupResultJson(JSON.stringify(record));
+  try {
+    await setLastBackupResultJson('');
+    await setLastBackupResult(summary);
+    await setLastBackupResultJson(JSON.stringify(record));
+  } catch (error) {
+    logger.warn('Could not record the backup result.', error);
+  }
 }
 
 const stringList = (value: unknown): string[] =>
@@ -122,10 +137,7 @@ export function formatLastBackupResult(summary: string, json: string): string {
 
   const warnings = stringList(parsed.warnings);
   const warningCount = count(parsed.warningCount, warnings.length);
-  if (warningCount > 0) {
-    const more = warningCount - warnings.length;
-    message += `\n\nWarnings:\n${warnings.join('\n')}` + (more > 0 ? `\n… and ${more} more` : '');
-  }
+  if (warningCount > 0) message += `\n${formatList('Warnings', warnings, warningCount)}`;
 
   return message;
 }
