@@ -7,14 +7,28 @@ import { verifyBackup } from './verify';
 import { registerSettings, getSettings } from './settings';
 import { initScheduler } from './scheduler';
 import { formatLastBackupResult } from './result';
+import { errorMessage } from './platform';
 
 export const CREATE_COMMAND = 'CreateIncrementalBackup';
 export const VERIFY_COMMAND = 'VerifyIncrementalBackup';
 export const SHOW_LAST_BACKUP_RESULT_COMMAND = 'ShowLastBackupResult';
 export const MENU_ID = 'incrementalBackup.toolsMenu';
 
-export async function handleCreateBackup(): Promise<void> {
+/**
+ * Run a command's action; if it throws, log the error and tell the user
+ * "`failure`: <reason>".
+ */
+async function withErrorDialog(failure: string, action: () => Promise<void>): Promise<void> {
   try {
+    await action();
+  } catch (error) {
+    logger.error(`${failure}.`, error);
+    await joplin.views.dialogs.showMessageBox(`${failure}: ${errorMessage(error)}`);
+  }
+}
+
+export function handleCreateBackup(): Promise<void> {
+  return withErrorDialog('Backup failed', async () => {
     const result = await runBackup();
     if (result.status === 'skipped') {
       await joplin.views.dialogs.showMessageBox(result.message);
@@ -27,40 +41,25 @@ export async function handleCreateBackup(): Promise<void> {
           ? `\n\nWarnings (${result.warnings.length}):\n${result.warnings.join('\n')}`
           : ''),
     );
-  } catch (error) {
-    logger.error('Backup failed.', error);
-    await joplin.views.dialogs.showMessageBox(
-      `Backup failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  });
 }
 
-export async function handleVerifyBackup(): Promise<void> {
-  try {
+export function handleVerifyBackup(): Promise<void> {
+  return withErrorDialog('Verification failed', async () => {
     const result = await verifyBackup();
     await joplin.views.dialogs.showMessageBox(result.message);
-  } catch (error) {
-    logger.error('Verification failed.', error);
-    await joplin.views.dialogs.showMessageBox(
-      `Verification failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  });
 }
 
-export async function handleShowLastBackupResult(): Promise<void> {
-  try {
+export function handleShowLastBackupResult(): Promise<void> {
+  return withErrorDialog('Could not show last backup result', async () => {
     const settings = await getSettings();
     const message = formatLastBackupResult(
       settings.lastBackupResult ?? '',
       settings.lastBackupResultJson ?? '',
     );
     await joplin.views.dialogs.showMessageBox(message);
-  } catch (error) {
-    logger.error('Could not show last backup result.', error);
-    await joplin.views.dialogs.showMessageBox(
-      `Could not show last backup result: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  });
 }
 
 async function registerCommands(): Promise<void> {

@@ -16,7 +16,9 @@ import {
   checkDiskSpace,
   collectFilesRecursive,
   computeFileSha256,
-  ensureBackupRoot,
+  bestEffort,
+  errorMessage,
+  ifExists,
   hashFile,
   isHardlinkUnsupportedError,
   hasFreshLock,
@@ -289,10 +291,27 @@ describe('mapWithConcurrency', () => {
 });
 
 describe('filesystem helpers', () => {
-  it('ensureBackupRoot creates nested directories', async () => {
-    const root = path.join(ROOT, 'nested', 'backup');
-    await ensureBackupRoot(root);
-    expect((await fs.stat(root)).isDirectory()).toBe(true);
+  it('ifExists gives null for ENOENT and rethrows other errors', async () => {
+    await fs.mkdir(ROOT, { recursive: true });
+    await fs.writeFile(path.join(ROOT, 'here.txt'), 'x');
+    await expect(ifExists(fs.readFile(path.join(ROOT, 'here.txt'), 'utf8'))).resolves.toBe('x');
+    await expect(ifExists(fs.stat(path.join(ROOT, 'missing')))).resolves.toBeNull();
+    const busy = Object.assign(new Error('busy'), { code: 'EBUSY' });
+    await expect(ifExists(Promise.reject(busy))).rejects.toBe(busy);
+  });
+
+  it('errorMessage reads Error messages and stringifies anything else', () => {
+    expect(errorMessage(new Error('boom'))).toBe('boom');
+    expect(errorMessage('plain')).toBe('plain');
+    expect(errorMessage(42)).toBe('42');
+  });
+
+  it('bestEffort logs a failure instead of throwing', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined);
+    const error = new Error('nope');
+    await expect(bestEffort(() => Promise.reject(error), 'It failed.')).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith('It failed.', error);
+    warn.mockRestore();
   });
 
   it('collectFilesRecursive returns normalized relative paths', async () => {

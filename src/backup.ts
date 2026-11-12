@@ -7,12 +7,15 @@ import {
   LockError,
   assertDiskSpace,
   atomicWriteFile,
+  bestEffort,
   collectFilesRecursive,
   DEFAULT_MIN_FREE_BYTES,
   DEFAULT_STALE_LOCK_MS,
-  ensureBackupRoot,
   errorCode,
+  errorMessage,
   hasFreshLock,
+  ifExists,
+  isFile,
   releaseLock,
   safeRmDir,
   startLockHeartbeat,
@@ -37,6 +40,7 @@ import { ToastType } from 'api/types';
 import {
   computeChanges,
   describeWarnings,
+  formatChangeCounts,
   formatSeconds,
   persistResult,
   recordChanges,
@@ -180,8 +184,13 @@ interface ResolvedContext {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Show a toast without waiting for it; one that fails to show is ignored. */
+function toast(options: Parameters<typeof joplin.views.dialogs.showToast>[0]): void {
+  void joplin.views.dialogs.showToast(options).catch(() => undefined);
+}
+
 export function isTransientExportError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   const code = errorCode(error);
   return TRANSIENT_EXPORT_ERROR_PATTERNS.some(
     (pattern) => pattern.test(message) || (code ? pattern.test(code) : false),
@@ -238,10 +247,9 @@ async function resolveJoplinVersion(): Promise<string> {
 // ---------------------------------------------------------------------------
 
 function localStagingWarning(error: unknown): BackupWarning {
-  const reason = error instanceof Error ? error.message : String(error);
   return {
     kind: 'staging',
-    message: `The export could not be staged on this computer (${reason}); it was written to the backup drive instead.`,
+    message: `The export could not be staged on this computer (${errorMessage(error)}); it was written to the backup drive instead.`,
   };
 }
 
@@ -300,25 +308,6 @@ async function resolveContext(options: BackupOptions): Promise<ResolvedContext> 
   };
 }
 
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    return (await fs.stat(filePath)).isFile();
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
-}
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await fs.stat(target);
-    return true;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
-}
-
 export function legacyBackupRootMissingMessage(backupRoot: string): string {
   return (
     `The backup directory "${backupRoot}" does not exist, but backups have been made ` +
@@ -365,7 +354,7 @@ export async function prepareBackupRoot(
 ): Promise<void> {
   const markerPath = path.join(backupRoot, ROOT_MARKER_FILENAME);
   const known = isKnownBackupRoot(backupRoot, initializedRoots);
-  if (await fileExists(markerPath)) {
+  if (await isFile(markerPath)) {
     if (!known) await addInitializedBackupRoot(backupRoot);
     return;
   }
@@ -374,11 +363,15 @@ export async function prepareBackupRoot(
     throw new Error(backupRootUnavailableMessage(backupRoot));
   }
 
-  if (hasBackedUpBefore && initializedRoots.length === 0 && !(await pathExists(backupRoot))) {
+  if (
+    hasBackedUpBefore &&
+    initializedRoots.length === 0 &&
+    (await ifExists(fs.stat(backupRoot))) === null
+  ) {
     throw new Error(legacyBackupRootMissingMessage(backupRoot));
   }
 
-  await ensureBackupRoot(backupRoot);
+  await fs.mkdir(backupRoot, { recursive: true });
   await atomicWriteFile(
     markerPath,
     'This directory holds Joplin Incremental Backup snapshots. Do not delete this file.\n',
@@ -402,16 +395,10 @@ async function recordFailure(
 ): Promise<void> {
   const durationMs = Date.now() - startTime;
   const duration = formatSeconds(durationMs);
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessage(error);
   logger.error('Backup failed.', error);
   if (notify) {
-    void joplin.views.dialogs
-      .showToast({
-        message: `Backup failed after ${duration}.`,
-        type: ToastType.Error,
-        duration: 6000,
-      })
-      .catch(() => undefined);
+    toast({ message: `Backup failed after ${duration}.`, type: ToastType.Error, duration: 6000 });
   }
   const finishedIso = finishedAt.toISOString();
   // persistResult never throws, so it cannot mask the original error.
@@ -499,11 +486,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     if (supersededBy !== null) return supersededResult(supersededBy);
 
     logger.info('Starting backup run...');
-    if (!options.quiet) {
-      void joplin.views.dialogs
-        .showToast({ message: 'Backup started…', type: ToastType.Info })
-        .catch(() => undefined);
-    }
+    if (!options.quiet) toast({ message: 'Backup started…', type: ToastType.Info });
 
     const lastSnapshotName = await resolveLastSnapshot(
       backupRoot,
@@ -534,7 +517,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         added: [],
         modified: [],
         deleted: [],
-        unchanged: lastManifest?.files.length ?? 0,
+        unchanged: lastManifest.files.length,
       };
       const result: BackupResult = {
         status: 'skipped',
@@ -542,9 +525,7 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         changes,
         message: 'No changes detected; backup skipped.',
       };
-      void joplin.views.dialogs
-        .showToast({ message: `Backup skipped (no changes) in ${duration}.`, type: ToastType.Info })
-        .catch(() => undefined);
+      toast({ message: `Backup skipped (no changes) in ${duration}.`, type: ToastType.Info });
       await persistResult(`Skipped (no changes) at ${nowIso} — ${duration}`, {
         status: 'skipped',
         startedAt: new Date(startTime).toISOString(),
@@ -599,20 +580,17 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       }, context.exportRetries);
 
     let exportResult: unknown;
-    if (localDir) {
-      try {
-        exportResult = await exportTo(localDir);
-      } catch (error) {
-        // The space check can only estimate the vault's size (and has nothing
-        // to go on for a first backup), so the local disk may still fill up.
-        // Fall back to staging on the backup drive rather than failing.
-        logger.warn('Local export failed; staging on the backup drive instead.', error);
-        await safeRmDir(localDir);
-        localDir = null;
-        stagingWarnings.push(localStagingWarning(error));
-        exportResult = await exportTo(activeDir);
-      }
-    } else {
+    try {
+      exportResult = await exportTo(localDir ?? activeDir);
+    } catch (error) {
+      if (!localDir) throw error;
+      // The space check can only estimate the vault's size (and has nothing
+      // to go on for a first backup), so the local disk may still fill up.
+      // Fall back to staging on the backup drive rather than failing.
+      logger.warn('Local export failed; staging on the backup drive instead.', error);
+      await safeRmDir(localDir);
+      localDir = null;
+      stagingWarnings.push(localStagingWarning(error));
       exportResult = await exportTo(activeDir);
     }
     // The export was written here: the local staging directory, or the
@@ -656,7 +634,6 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       ...stagingWarnings,
     ];
 
-    const dedupOptions = {};
     let dedupResult: DedupResult;
     if (localDir) {
       logger.info('Writing new and changed files to the backup drive...');
@@ -666,17 +643,10 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         lastSnapshotDir,
         lastManifest,
         activeFiles,
-        dedupOptions,
       );
     } else {
       logger.info('Deduplicating against previous snapshot...');
-      dedupResult = await dedup(
-        activeDir,
-        lastSnapshotDir,
-        lastManifest,
-        activeFiles,
-        dedupOptions,
-      );
+      dedupResult = await dedup(activeDir, lastSnapshotDir, lastManifest, activeFiles);
     }
 
     const exportedBytes = [...dedupResult.sizes.values()].reduce((sum, size) => sum + size, 0);
@@ -761,14 +731,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
       message:
         `Backup complete: ${manifest.fileCount} files in ${snapshotName} in ${duration}.` +
         (changes.added.length + changes.modified.length + changes.deleted.length > 0
-          ? ` Changes: +${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}.`
+          ? ` Changes: ${formatChangeCounts(changes)}.`
           : ' No file changes.') +
         describeWarnings(warnings),
     };
 
     await persistResult(
       `${finishedIso} — success — ${duration} — ${manifest.fileCount} files — ` +
-        `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`,
+        formatChangeCounts(changes),
       {
         status: 'success',
         startedAt: new Date(startTime).toISOString(),
@@ -791,15 +761,13 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
         (dedupResult.failed ? `, ${dedupResult.failed} failed` : '') +
         (warnings.length ? `, ${warnings.length} warning(s)` : ''),
     );
-    void joplin.views.dialogs
-      .showToast({
-        message:
-          `Backup complete in ${duration}: ${manifest.fileCount} files ` +
-          `(+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}).`,
-        type: ToastType.Success,
-        duration: 6000,
-      })
-      .catch(() => undefined);
+    toast({
+      message:
+        `Backup complete in ${duration}: ${manifest.fileCount} files ` +
+        `(${formatChangeCounts(changes)}).`,
+      type: ToastType.Success,
+      duration: 6000,
+    });
 
     return result;
   } catch (error) {
@@ -807,22 +775,14 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
     throw error;
   } finally {
     heartbeat.stop();
-    try {
-      await releaseLock(lockPath);
-    } catch (error) {
-      logger.warn('Failed to release backup lock.', error);
-    }
-    try {
-      await safeRmDir(activeDir);
-    } catch (error) {
-      logger.warn('Failed to clean the staging directory.', error);
-    }
-    if (localDir) {
-      try {
-        await safeRmDir(localDir);
-      } catch (error) {
-        logger.warn('Failed to clean the local staging directory.', error);
-      }
+    await bestEffort(() => releaseLock(lockPath), 'Failed to release backup lock.');
+    await bestEffort(() => safeRmDir(activeDir), 'Failed to clean the staging directory.');
+    const leftoverLocalDir = localDir;
+    if (leftoverLocalDir) {
+      await bestEffort(
+        () => safeRmDir(leftoverLocalDir),
+        'Failed to clean the local staging directory.',
+      );
     }
   }
 }
@@ -835,14 +795,12 @@ export async function runBackup(options: BackupOptions = {}): Promise<BackupResu
  * after the crash.
  */
 async function recoverLocalStagingDirs(options: BackupOptions): Promise<void> {
-  try {
+  await bestEffort(async () => {
     const stagingRoot = await resolveLocalStagingRoot(options);
     for (const name of await listStagingDirs(stagingRoot)) {
       await safeRmDir(path.join(stagingRoot, name));
     }
-  } catch (error) {
-    logger.warn('Local staging directory recovery skipped.', error);
-  }
+  }, 'Local staging directory recovery skipped.');
 }
 
 /**

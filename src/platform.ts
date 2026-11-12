@@ -26,6 +26,54 @@ export function errorCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/** The message of an `Error`, or the value itself as a string. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The value of `promise`, or `null` if it rejects with `ENOENT`. Other errors are rethrown. */
+export async function ifExists<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise;
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/** Whether `filePath` is a regular file (following symlinks). */
+export async function isFile(filePath: string): Promise<boolean> {
+  return (await ifExists(fs.stat(filePath)))?.isFile() ?? false;
+}
+
+/** Whether `dirPath` is a directory (following symlinks). */
+export async function isDirectory(dirPath: string): Promise<boolean> {
+  return (await ifExists(fs.stat(dirPath)))?.isDirectory() ?? false;
+}
+
+/**
+ * Whether anything at all (file, directory, dangling symlink) is at `target`.
+ * Uses `lstat`, so a symlink counts even when what it points to is gone.
+ */
+export async function pathExists(target: string): Promise<boolean> {
+  return (await ifExists(fs.lstat(target))) !== null;
+}
+
+/** Names of the subdirectories of `dir`; none when `dir` does not exist. */
+export async function listSubdirectories(dir: string): Promise<string[]> {
+  const entries = (await ifExists(fs.readdir(dir, { withFileTypes: true }))) ?? [];
+  return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+}
+
+/** Run `fn`, logging `warning` instead of throwing if it fails. */
+export async function bestEffort(fn: () => Promise<unknown>, warning: string): Promise<void> {
+  try {
+    await fn();
+  } catch (error) {
+    logger.warn(warning, error);
+  }
+}
+
 /**
  * Write `content` to `targetPath` via a temporary file so readers never observe
  * a partially written file. Renames over an existing target are retried after
@@ -88,10 +136,6 @@ export class LockError extends Error {
   }
 }
 
-function createLockError(lockPath: string): LockError {
-  return new LockError(lockPath);
-}
-
 /**
  * Create an exclusive lock file. `'wx'` maps to O_CREAT | O_EXCL, so only one
  * writer can win the race. A lock older than `staleLimitMs` is assumed to be
@@ -117,20 +161,13 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
 
   if (await tryCreate()) return;
 
-  let stale = false;
-  try {
-    const stat = await fs.stat(lockPath);
-    stale = Date.now() - stat.mtime.getTime() > staleLimitMs;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') {
-      // Released between our attempt and the stat; try once more.
-      if (await tryCreate()) return;
-      throw createLockError(lockPath);
-    }
-    throw error;
+  const stat = await ifExists(fs.stat(lockPath));
+  if (stat === null) {
+    // Released between our attempt and the stat; try once more.
+    if (await tryCreate()) return;
+    throw new LockError(lockPath);
   }
-
-  if (!stale) throw createLockError(lockPath);
+  if (Date.now() - stat.mtime.getTime() <= staleLimitMs) throw new LockError(lockPath);
 
   // Steal the stale lock atomically. Renaming moves it out of the way in a
   // single step, so exactly one contender can win: a second contender sees
@@ -142,14 +179,14 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
     if (errorCode(error) === 'ENOENT') {
       // Another contender already stole (or released) it; try once more.
       if (await tryCreate()) return;
-      throw createLockError(lockPath);
+      throw new LockError(lockPath);
     }
     throw error;
   }
 
   await fs.rm(stalePath, { force: true });
   if (await tryCreate()) return;
-  throw createLockError(lockPath);
+  throw new LockError(lockPath);
 }
 
 /**
@@ -166,13 +203,8 @@ export async function acquireLock(lockPath: string, staleLimitMs: number): Promi
  * stolen in the meantime must not be resurrected by the heartbeat.
  */
 export async function touchLock(lockPath: string): Promise<void> {
-  let handle;
-  try {
-    handle = await fs.open(lockPath, 'r+');
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return;
-    throw error;
-  }
+  const handle = await ifExists(fs.open(lockPath, 'r+'));
+  if (handle === null) return;
 
   try {
     await handle.truncate(0);
@@ -184,13 +216,8 @@ export async function touchLock(lockPath: string): Promise<void> {
 
 /** True when a lock file exists and was refreshed within `staleLimitMs`. */
 export async function hasFreshLock(lockPath: string, staleLimitMs: number): Promise<boolean> {
-  try {
-    const stat = await fs.stat(lockPath);
-    return Date.now() - stat.mtime.getTime() <= staleLimitMs;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
+  const stat = await ifExists(fs.stat(lockPath));
+  return stat !== null && Date.now() - stat.mtime.getTime() <= staleLimitMs;
 }
 
 export async function releaseLock(lockPath: string): Promise<void> {
@@ -235,10 +262,6 @@ export async function safeRmDir(dirPath: string): Promise<void> {
     }
     throw error;
   }
-}
-
-export async function ensureBackupRoot(backupRoot: string): Promise<void> {
-  await fs.mkdir(backupRoot, { recursive: true });
 }
 
 /**

@@ -1,12 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import {
-  atomicWriteFile,
-  errorCode,
-  hashFile,
-  mapWithConcurrency,
-  toManifestKey,
-} from './platform';
+import { atomicWriteFile, hashFile, ifExists, mapWithConcurrency, toManifestKey } from './platform';
 
 export const MANIFEST_FILENAME = 'manifest.json';
 const MANIFEST_HASH_CONCURRENCY = 8;
@@ -119,13 +113,8 @@ export function isValidManifest(value: unknown): value is Manifest {
 export async function readManifest(snapshotDir: string): Promise<Manifest | null> {
   const manifestPath = path.join(snapshotDir, MANIFEST_FILENAME);
 
-  let raw: string;
-  try {
-    raw = await fs.readFile(manifestPath, 'utf8');
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return null;
-    throw error;
-  }
+  const raw = await ifExists(fs.readFile(manifestPath, 'utf8'));
+  if (raw === null) return null;
 
   try {
     const parsed: unknown = JSON.parse(raw);

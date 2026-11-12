@@ -3,6 +3,7 @@ import path from 'path';
 import {
   errorCode,
   hashFile,
+  isFile,
   isHardlinkUnsupportedError,
   mapWithConcurrency,
   toDedupeKey,
@@ -69,16 +70,6 @@ function findMatch(index: ContentIndex, key: string, sha256: string): FileEntry 
   const byPath = index.pathIndex.get(key);
   if (byPath && byPath.sha256 === sha256) return byPath;
   return index.hashIndex.get(sha256) ?? null;
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    const stats = await fs.stat(filePath);
-    return stats.isFile();
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
 }
 
 /**
@@ -198,27 +189,22 @@ export async function dedup(
 
       const sourcePath = path.join(previousSnapshotDir, match.path);
       if (path.resolve(sourcePath) === path.resolve(activePath)) return null;
-      if (!(await fileExists(sourcePath))) return null;
+      if (!(await isFile(sourcePath))) return null;
 
       try {
-        let mode: 'hardlink' | 'copy';
-        if (linkSupport) {
-          // The exported file is identical to the match and stays as a full copy.
-          if (!(await linkSupport)) return 'copy';
-          mode = await replaceWithLink(sourcePath, activePath);
-        } else {
-          // First link of the run: it decides for everyone else. An
-          // "unsupported" result is confirmed with canHardlink before linking
-          // is turned off; any other error is per-file and counts as supported.
-          const probe = replaceWithLink(sourcePath, activePath);
-          linkSupport = probe
-            .then(
-              (result) =>
-                result === 'hardlink' || canHardlink(sourcePath, path.dirname(activePath)),
-            )
-            .catch(() => true);
-          mode = await probe;
-        }
+        // Linking is known not to work: the exported file is identical to the
+        // match and stays as a full copy.
+        if (linkSupport && !(await linkSupport)) return 'copy';
+        const attempt = replaceWithLink(sourcePath, activePath);
+        // The first link of the run decides for everyone else. An
+        // "unsupported" result is confirmed with canHardlink before linking is
+        // turned off; any other error is per-file and counts as supported.
+        linkSupport ??= attempt
+          .then(
+            (result) => result === 'hardlink' || canHardlink(sourcePath, path.dirname(activePath)),
+          )
+          .catch(() => true);
+        const mode = await attempt;
         if (mode === 'hardlink') return mode;
         if (!(await linkSupport)) return 'copy';
         throw new Error('The filesystem supports hardlinks, but this file could not be linked.');
@@ -308,7 +294,7 @@ export async function stageFromLocal(
         : null;
       const sourcePath =
         match && previousSnapshotDir ? path.join(previousSnapshotDir, match.path) : null;
-      if (!sourcePath || !(await fileExists(sourcePath))) {
+      if (!sourcePath || !(await isFile(sourcePath))) {
         await fs.copyFile(localPath, targetPath);
         return null;
       }
@@ -318,30 +304,22 @@ export async function stageFromLocal(
         return 'copy';
       }
 
-      let linkError: unknown = null;
-      if (linkSupport) {
-        linkError = await fs.link(sourcePath, targetPath).then(
-          () => null,
-          (error: unknown) => error,
-        );
-      } else {
-        // First link of the run: it decides for everyone else. An
-        // "unsupported" error is confirmed with canHardlink before linking is
-        // turned off; any other error is per-file and counts as supported.
-        const attempt = fs.link(sourcePath, targetPath).then(
-          () => null,
-          (error: unknown) => error,
-        );
-        linkSupport = attempt
-          .then(
-            (error) =>
-              error === null ||
-              !isHardlinkUnsupportedError(error) ||
-              canHardlink(sourcePath, path.dirname(targetPath)),
-          )
-          .catch(() => true);
-        linkError = await attempt;
-      }
+      const attempt = fs.link(sourcePath, targetPath).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // The first link of the run decides for everyone else. An "unsupported"
+      // error is confirmed with canHardlink before linking is turned off; any
+      // other error is per-file and counts as supported.
+      linkSupport ??= attempt
+        .then(
+          (error) =>
+            error === null ||
+            !isHardlinkUnsupportedError(error) ||
+            canHardlink(sourcePath, path.dirname(targetPath)),
+        )
+        .catch(() => true);
+      const linkError = await attempt;
       if (linkError === null) return 'hardlink';
 
       await fs.copyFile(localPath, targetPath);
