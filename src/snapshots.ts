@@ -1,7 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { Dirent } from 'fs';
-import { errorCode } from './platform';
+import { ifExists, isDirectory, listSubdirectories, pathExists } from './platform';
 import { listSnapshots } from './retention';
 
 export const LOCK_FILENAME = '.backup.lock';
@@ -35,17 +34,9 @@ export function createStagingDirName(now: Date = new Date()): string {
 
 /** Names of the staging directories currently present under `backupRoot`. */
 export async function listStagingDirs(backupRoot: string): Promise<string[]> {
-  let entries: Dirent[];
-  try {
-    entries = await fs.readdir(backupRoot, { withFileTypes: true });
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return [];
-    throw error;
-  }
-
-  return entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith(ACTIVE_DIR_PREFIX))
-    .map((entry) => entry.name);
+  return (await listSubdirectories(backupRoot)).filter((name) =>
+    name.startsWith(ACTIVE_DIR_PREFIX),
+  );
 }
 
 export function snapshotDirPath(backupRoot: string, snapshotName: string): string {
@@ -65,12 +56,7 @@ export function generateSnapshotName(date: Date = new Date()): string {
 }
 
 async function snapshotNameExists(backupRoot: string, snapshotName: string): Promise<boolean> {
-  try {
-    return (await fs.stat(path.join(backupRoot, snapshotName))).isDirectory();
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
+  return isDirectory(path.join(backupRoot, snapshotName));
 }
 
 /**
@@ -78,13 +64,7 @@ async function snapshotNameExists(backupRoot: string, snapshotName: string): Pro
  * so the new snapshot can be renamed into place without removing it first.
  */
 async function nameTaken(backupRoot: string, name: string): Promise<boolean> {
-  try {
-    await fs.lstat(path.join(backupRoot, name));
-    return true;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return false;
-    throw error;
-  }
+  return pathExists(path.join(backupRoot, name));
 }
 
 /**
@@ -105,13 +85,8 @@ export async function resolveUniqueSnapshotName(
 }
 
 export async function readLatestSnapshotName(backupRoot: string): Promise<string | null> {
-  try {
-    const name = (await fs.readFile(path.join(backupRoot, LATEST_FILENAME), 'utf8')).trim();
-    return name || null;
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return null;
-    throw error;
-  }
+  const content = await ifExists(fs.readFile(path.join(backupRoot, LATEST_FILENAME), 'utf8'));
+  return content?.trim() || null;
 }
 
 /**
@@ -122,10 +97,8 @@ export async function resolveLastSnapshot(
   backupRoot: string,
   preferredSnapshotName?: string,
 ): Promise<string | null> {
-  if (preferredSnapshotName) {
-    if (await snapshotNameExists(backupRoot, preferredSnapshotName)) {
-      return preferredSnapshotName;
-    }
+  if (preferredSnapshotName && (await snapshotNameExists(backupRoot, preferredSnapshotName))) {
+    return preferredSnapshotName;
   }
 
   const latest = await readLatestSnapshotName(backupRoot);

@@ -3,6 +3,7 @@ import path from 'path';
 import { logger } from './logger';
 import {
   acquireLock,
+  bestEffort,
   collectFilesRecursive,
   computeFileSha256,
   DEFAULT_STALE_LOCK_MS,
@@ -61,6 +62,10 @@ function emptyVerifyResult(
   };
 }
 
+function noSnapshotResult(): VerifyResult {
+  return emptyVerifyResult(null, null, 'No snapshot found to verify.');
+}
+
 /**
  * Verify the latest snapshot against its manifest.
  *
@@ -92,35 +97,34 @@ export async function verifyBackup(options: BackupOptions = {}): Promise<VerifyR
       );
     }
     // No backup directory yet: nothing to verify (reported below).
-    if (code === 'ENOENT') return emptyVerifyResult(null, null, 'No snapshot found to verify.');
+    if (code === 'ENOENT') return noSnapshotResult();
     // A read-only drive can't be backed up to, so nothing can prune it.
     if (!code || !READ_ONLY_CODES.has(code)) throw error;
     logger.warn(`Verifying without a lease: the backup drive is not writable (${code}).`);
     snapshotName = await resolve();
     return snapshotName
       ? verifySnapshot(backupRoot, snapshotName, computeHash)
-      : emptyVerifyResult(null, null, 'No snapshot found to verify.');
+      : noSnapshotResult();
   }
 
   try {
     snapshotName = await resolve();
     if (snapshotName) leasePath = await createVerifyLease(backupRoot, snapshotName);
   } finally {
-    await releaseLock(lockPath).catch((error) =>
-      logger.warn('Failed to release backup lock.', error),
-    );
+    await bestEffort(() => releaseLock(lockPath), 'Failed to release backup lock.');
   }
 
-  if (!snapshotName) return emptyVerifyResult(null, null, 'No snapshot found to verify.');
+  if (!snapshotName) return noSnapshotResult();
 
   const heartbeat = startLockHeartbeat(leasePath!, staleLockMs, 'verify lease');
   try {
     return await verifySnapshot(backupRoot, snapshotName, computeHash);
   } finally {
     heartbeat.stop();
-    await fs
-      .rm(leasePath!, { force: true })
-      .catch((error) => logger.warn('Failed to remove the verify lease.', error));
+    await bestEffort(
+      () => fs.rm(leasePath!, { force: true }),
+      'Failed to remove the verify lease.',
+    );
   }
 }
 
@@ -150,9 +154,7 @@ async function verifySnapshot(
       }
       // Size matches; pass the known size as the hint so the hasher can skip its stat.
       const actual = await computeHash(filePath, file.size);
-      return actual === file.sha256
-        ? { path: file.path, ok: true }
-        : { path: file.path, ok: false };
+      return { path: file.path, ok: actual === file.sha256 };
     } catch (error) {
       if (errorCode(error) === 'ENOENT') return { path: file.path, ok: false };
       throw error;

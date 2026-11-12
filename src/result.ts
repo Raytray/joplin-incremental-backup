@@ -1,6 +1,5 @@
-import { logger } from './logger';
 import { setLastBackupResult, setLastBackupResultJson } from './settings';
-import { toManifestKey } from './platform';
+import { bestEffort, toManifestKey } from './platform';
 import type { Manifest } from './manifest';
 
 /**
@@ -46,6 +45,11 @@ export function computeChanges(
   }
   modified.sort();
   return { added, modified, deleted, unchanged };
+}
+
+/** Change counts in the short form used in summaries, e.g. "+3 ~1 -0". */
+export function formatChangeCounts(changes: BackupChanges): string {
+  return `+${changes.added.length} ~${changes.modified.length} -${changes.deleted.length}`;
 }
 
 /** `BackupChanges` as persisted: exact counts, and the first paths of each list. */
@@ -115,13 +119,11 @@ export function recordWarnings(warnings: readonly string[]): {
  * fails midway never pairs the new summary with the previous run's details.
  */
 export async function persistResult(summary: string, record: BackupRecord): Promise<void> {
-  try {
+  await bestEffort(async () => {
     await setLastBackupResultJson('');
     await setLastBackupResult(summary);
     await setLastBackupResultJson(JSON.stringify(record));
-  } catch (error) {
-    logger.warn('Could not record the backup result.', error);
-  }
+  }, 'Could not record the backup result.');
 }
 
 const stringList = (value: unknown): string[] =>

@@ -1,7 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import type { Dirent } from 'fs';
-import { errorCode, safeRmDir } from './platform';
+import { ifExists, listSubdirectories, safeRmDir } from './platform';
 
 export const DEFAULT_RETENTION = 5;
 export const MIN_RETENTION = 1;
@@ -47,15 +46,7 @@ export async function leasedSnapshots(
   staleLeaseMs = DEFAULT_STALE_LEASE_MS,
 ): Promise<Set<string>> {
   const leased = new Set<string>();
-  let names: string[];
-  try {
-    names = await fs.readdir(backupRoot);
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return leased;
-    throw error;
-  }
-
-  for (const name of names) {
+  for (const name of (await ifExists(fs.readdir(backupRoot))) ?? []) {
     if (!name.startsWith(VERIFY_LEASE_PREFIX)) continue;
     const rest = name.slice(VERIFY_LEASE_PREFIX.length);
     const snapshot = rest.slice(0, rest.lastIndexOf('.'));
@@ -74,17 +65,8 @@ export async function leasedSnapshots(
 
 /** Snapshot directory names, sorted oldest-first (lexicographic == chronological). */
 export async function listSnapshots(backupRoot: string): Promise<string[]> {
-  let entries: Dirent[];
-  try {
-    entries = await fs.readdir(backupRoot, { withFileTypes: true });
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return [];
-    throw error;
-  }
-
-  return entries
-    .filter((entry) => entry.isDirectory() && SNAPSHOT_DIR_PATTERN.test(entry.name))
-    .map((entry) => entry.name)
+  return (await listSubdirectories(backupRoot))
+    .filter((name) => SNAPSHOT_DIR_PATTERN.test(name))
     .sort();
 }
 
