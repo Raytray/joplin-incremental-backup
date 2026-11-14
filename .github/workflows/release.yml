@@ -18,6 +18,8 @@ concurrency:
 jobs:
   release:
     name: Publish to npm and create GitHub Release
+    # Forgejo also runs this repo's workflows; only github.com can publish.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
