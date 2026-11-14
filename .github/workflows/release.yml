@@ -1,12 +1,18 @@
 name: Release
 
-# Push a tag like v1.0.6 (matching package.json and src/manifest.json) from a
-# commit on main. Publishes to npm through npm trusted publishing (OIDC, no
-# stored token, provenance attached) and creates a GitHub Release.
+# Runs on every push to main. When the version in package.json (and
+# src/manifest.json) has no npm release or GitHub Release yet, it tags the
+# commit vX.Y.Z, publishes to npm through npm trusted publishing (OIDC, no
+# stored token, provenance attached), and creates a GitHub Release. Merging a
+# version bump is the release; pushes that don't change the version stop after
+# the check job.
+#
+# Each step skips what is already done, so re-running a failed run picks up
+# where it stopped.
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 
 permissions:
   contents: read
@@ -16,21 +22,93 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Publish to npm and create GitHub Release
+  check:
+    name: Check for an unreleased version
     # Forgejo also runs this repo's workflows; only github.com can publish.
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write # create the GitHub Release
-      id-token: write # npm trusted publishing
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish-npm: ${{ steps.check.outputs.publish-npm }}
+      create-release: ${{ steps.check.outputs.create-release }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            package.json
+            src/manifest.json
+          sparse-checkout-cone-mode: false
+
+      - name: Check versions, npm, and GitHub Release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          pkg="$(node -p "require('./package.json').version")"
+          manifest="$(node -p "require('./src/manifest.json').version")"
+          echo "package.json=$pkg manifest=$manifest"
+          if [ "$pkg" != "$manifest" ]; then
+            echo "::error::package.json ($pkg) and src/manifest.json ($manifest) have different versions"
+            exit 1
+          fi
+          echo "version=$pkg" >> "$GITHUB_OUTPUT"
+
+          # 200 = published, 404 = not yet; anything else is a registry problem.
+          status="$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/$name/$pkg")"
+          case "$status" in
+            200) publish_npm=false ;;
+            404) publish_npm=true ;;
+            *) echo "::error::npm registry returned HTTP $status for $name@$pkg"; exit 1 ;;
+          esac
+
+          if gh release view "v$pkg" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            create_release=false
+          else
+            create_release=true
+          fi
+
+          echo "publish $name@$pkg to npm: $publish_npm; create GitHub Release v$pkg: $create_release"
+          echo "publish-npm=$publish_npm" >> "$GITHUB_OUTPUT"
+          echo "create-release=$create_release" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish to npm and create GitHub Release
+    needs: check
+    if: needs.check.outputs.publish-npm == 'true' || needs.check.outputs.create-release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the tag and the GitHub Release
+      id-token: write # npm trusted publishing
+    env:
+      TAG: v${{ needs.check.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # A tag already at another commit (a release attempt from an earlier
+      # commit, or a hand-made tag) needs a person to look at it, so fail
+      # instead of moving it.
+      - name: Tag this commit
+        run: |
+          if sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2>/dev/null)"; then
+            if [ "$sha" != "$GITHUB_SHA" ]; then
+              echo "::error::$TAG already points at $sha, not $GITHUB_SHA. If that release attempt is abandoned, delete the tag and re-run this workflow."
+              exit 1
+            fi
+            echo "$TAG already points at this commit"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+            echo "Created $TAG at $GITHUB_SHA"
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
           persist-credentials: false
 
       # Node 24 ships npm 11, which trusted publishing needs (>= 11.5.1).
@@ -39,25 +117,6 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-
-      - name: Check tag matches package.json and manifest
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg="$(node -p "require('./package.json').version")"
-          manifest="$(node -p "require('./src/manifest.json').version")"
-          echo "tag=$tag package.json=$pkg manifest=$manifest"
-          if [ "$tag" != "$pkg" ] || [ "$tag" != "$manifest" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($pkg) and src/manifest.json ($manifest)"
-            exit 1
-          fi
-
-      # main only takes changes that passed CI (see the "Protect main" ruleset).
-      - name: Check the tagged commit is on main
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main"
-            exit 1
-          fi
 
       # Also builds publish/ via the prepare script.
       - name: Install dependencies
@@ -70,9 +129,9 @@ jobs:
           npx tsc --noEmit
 
       - name: Publish to npm
+        if: needs.check.outputs.publish-npm == 'true'
         run: npm publish --provenance --access public
 
       - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" publish/*.jpl --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        if: needs.check.outputs.create-release == 'true'
+        run: gh release create "$TAG" publish/*.jpl --verify-tag --generate-notes --title "$TAG"
