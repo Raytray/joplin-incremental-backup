@@ -1,6 +1,14 @@
 {
   "name": "joplin-plugin-incremental-backup",
   "version": "1.0.6",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Raytray/joplin-incremental-backup.git"
+  },
+  "homepage": "https://github.com/Raytray/joplin-incremental-backup#readme",
+  "bugs": {
+    "url": "https://github.com/Raytray/joplin-incremental-backup/issues"
+  },
   "scripts": {
     "dist": "webpack --env joplin-plugin-config=buildMain && webpack --env joplin-plugin-config=buildExtraScripts && webpack --env joplin-plugin-config=createArchive",
     "prepare": "npm run dist",
