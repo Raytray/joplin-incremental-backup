@@ -158,17 +158,13 @@ CI runs the suite on the oldest supported Joplin (3.2.11) and on 3.7.22. To test
 
 ### Releasing
 
-Releases are published from CI. Nobody runs `npm publish` by hand.
+Releases are published from CI. Nobody runs `npm publish` or pushes release tags by hand.
 
-1. On a branch, run `npm run updateVersion` (bumps the patch version in `package.json` and `src/manifest.json`), then `npm install --package-lock-only` to update the lockfile. For a minor or major bump, set the version in both files by hand. Merge it as a "Release vX.Y.Z" PR.
-2. Tag the merged commit on `main` and push the tag:
+1. On a branch, run `npm run updateVersion` (bumps the patch version in `package.json` and `src/manifest.json`), then `npm install --package-lock-only` to update the lockfile. For a minor or major bump, set the version in both files by hand.
+2. Merge it as a "Release vX.Y.Z" PR.
+3. On the push to `main`, [`release.yml`](./.github/workflows/release.yml) sees a version that hasn't been released yet. It tags the merged commit `vX.Y.Z` and runs the tests. Then it publishes to npm with provenance (npm trusted publishing, no stored token) and creates a GitHub Release with the `.jpl` attached. Pushes that don't change the version release nothing.
 
-   ```bash
-   git switch main && git pull
-   git tag v1.0.6 && git push origin v1.0.6
-   ```
-
-3. [`release.yml`](./.github/workflows/release.yml) checks that the tag matches both versions and is on `main`. It runs the tests, then publishes to npm with provenance (npm trusted publishing, no stored token). It also creates a GitHub Release with the `.jpl` attached.
+If a release run fails, re-run it: steps that already finished (tag, npm, GitHub Release) are skipped. If the tag already points at a different commit, the run stops. Delete the tag if that earlier attempt is abandoned, then re-run.
 
 Joplin's plugin repository picks up new npm versions automatically. This works because the package name starts with `joplin-plugin-`, `keywords` includes `joplin-plugin`, and `publish/` holds the `.jpl` and `.json`.
 
