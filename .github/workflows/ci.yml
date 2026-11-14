@@ -47,7 +47,8 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Upload coverage report
-        if: always()
+        # Artifact actions v4+ refuse to run off github.com (GHES check), e.g. on Forgejo.
+        if: always() && github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -106,7 +107,8 @@ jobs:
           JOPLIN_E2E_WORKDIR: ${{ runner.temp }}/joplin-e2e
 
       - name: Upload Joplin logs
-        if: failure()
+        # Artifact actions v4+ refuse to run off github.com (GHES check), e.g. on Forgejo.
+        if: failure() && github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs-joplin-${{ matrix.joplin }}
