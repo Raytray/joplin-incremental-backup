@@ -112,23 +112,32 @@ Snapshots are plain Joplin Raw exports, so restoring doesn't require this plugin
 
 This makes the backups a safe, vendor-independent archive: even without the plugin (or without Joplin itself), your data is readable.
 
-## Building from source
+## Contributing
+
+Bug reports and pull requests are welcome. For security problems, follow [SECURITY.md](./SECURITY.md) instead of opening an issue.
+
+### Setup
 
 Needs Node.js 22.12 or later.
 
 ```bash
-npm install
-npm run dist     # builds the plugin into publish/
+npm ci           # install the locked dependencies; also builds the plugin into publish/
+npm run dist     # rebuild publish/ (the .jpl and its .json) after changes
 ```
 
-The project started from the `generator-joplin` scaffold, but don't refresh it with the generator: its template pins older dev dependencies and would overwrite `tsconfig.json`. Update dependencies directly with npm.
+To try a build in Joplin, install `publish/io.github.raytray.joplin-incremental-backup.jpl` with **Install from file** in the Plugins section of Joplin's settings.
 
-Other scripts:
+The plugin entry point is `src/index.ts` and its manifest is `src/manifest.json`. The project started from the `generator-joplin` scaffold, but don't refresh it with the generator: its template pins older dev dependencies and would overwrite `tsconfig.json` and `webpack.config.js`. Update dependencies directly with npm (Dependabot opens monthly PRs for this).
+
+### Before opening a pull request
+
+CI runs these on every PR, and `main` only accepts squash-merged PRs whose checks pass:
 
 ```bash
-npm run format        # format the codebase with Prettier
-npm run format:check  # check formatting (CI)
-npm run updateVersion # sync version from package.json into the manifest
+npm run lint          # oxlint
+npm run format:check  # Prettier (npm run format to fix)
+npm test              # unit tests (npm run test:coverage for a coverage report)
+npx tsc --noEmit      # typecheck src and tests
 ```
 
 ### End-to-end tests
@@ -147,7 +156,27 @@ For headless runs, install Xvfb first (`sudo apt-get install xvfb`). The harness
 
 CI runs the suite on the oldest supported Joplin (3.2.11) and on 3.7.22. To test another version locally, run `npm run fetch-joplin -- 3.2.11`; it becomes the default for `npm run test:e2e`. Set `JOPLIN_BIN` to use a different Joplin executable, `JOPLIN_E2E_WORKDIR` to choose where the profile, logs and backups go, and `JOPLIN_E2E_KEEP=1` to keep them after a passing run. They are always kept when a test fails. The tests never touch your own Joplin profile, and they run alongside a Joplin you already have open.
 
-For information on publishing the plugin, see [GENERATOR_DOC.md](./GENERATOR_DOC.md).
+### Releasing
+
+Releases are published from CI. Nobody runs `npm publish` by hand.
+
+1. On a branch, run `npm run updateVersion` (bumps the patch version in `package.json` and `src/manifest.json`), then `npm install --package-lock-only` to update the lockfile. For a minor or major bump, set the version in both files by hand. Merge it as a "Release vX.Y.Z" PR.
+2. Tag the merged commit on `main` and push the tag:
+
+   ```bash
+   git switch main && git pull
+   git tag v1.0.6 && git push origin v1.0.6
+   ```
+
+3. [`release.yml`](./.github/workflows/release.yml) checks that the tag matches both versions and is on `main`. It runs the tests, then publishes to npm with provenance (npm trusted publishing, no stored token). It also creates a GitHub Release with the `.jpl` attached.
+
+Joplin's plugin repository picks up new npm versions automatically. This works because the package name starts with `joplin-plugin-`, `keywords` includes `joplin-plugin`, and `publish/` holds the `.jpl` and `.json`.
+
+### References
+
+- [Joplin Plugin API](https://joplinapp.org/api/references/plugin_api/classes/joplin.html)
+- [Joplin Data API](https://joplinapp.org/help/api/references/rest_api)
+- [Joplin plugin manifest](https://joplinapp.org/api/references/plugin_manifest/)
 
 ## License
 
