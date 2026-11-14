@@ -16,10 +16,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -49,7 +49,7 @@ jobs:
       - name: Upload coverage report
         # Artifact actions v4+ refuse to run off github.com (GHES check), e.g. on Forgejo.
         if: always() && github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -73,10 +73,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -92,7 +92,7 @@ jobs:
         run: npm ci
 
       - name: Cache Joplin
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .cache/joplin/${{ matrix.joplin }}
           key: joplin-${{ runner.os }}-${{ matrix.joplin }}-${{ hashFiles('scripts/fetch-joplin.sh') }}
@@ -109,7 +109,7 @@ jobs:
       - name: Upload Joplin logs
         # Artifact actions v4+ refuse to run off github.com (GHES check), e.g. on Forgejo.
         if: failure() && github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs-joplin-${{ matrix.joplin }}
           path: |
